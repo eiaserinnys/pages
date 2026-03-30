@@ -2,6 +2,8 @@
 
 A lightweight HTML page hosting service. Clients upload HTML via a Bearer-token-authenticated API and receive a unique public URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
 
+![Dashboard](pages.jpg)
+
 ## Features
 
 - **HTML upload** — POST any HTML string and get back a stable `/p/:id` URL
