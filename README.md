@@ -1,6 +1,6 @@
 # pages
 
-A lightweight HTML page hosting service for `pages.eiaserinnys.me`. Clients upload HTML via a Bearer-token-authenticated API and receive a unique public URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
+A lightweight HTML page hosting service. Clients upload HTML via a Bearer-token-authenticated API and receive a unique public URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
 
 ## Features
 
@@ -20,7 +20,7 @@ Create a `.env` file in the project root (see `.env.example` if present):
 | `PAGES_DIR`           | Absolute path to the directory where pages are stored          |
 | `PAGES_API_TOKEN`     | Secret token required for `POST /api/pages`                    |
 | `SESSION_SECRET`      | Secret used to sign the session cookie                         |
-| `BASE_URL`            | Public base URL without trailing slash (e.g. `https://pages.eiaserinnys.me`) |
+| `BASE_URL`            | Public base URL without trailing slash (e.g. `https://pages.example.com`) |
 | `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 client ID                                     |
 | `GOOGLE_CLIENT_SECRET`| Google OAuth 2.0 client secret                                 |
 | `ALLOWED_EMAILS`      | Comma-separated list of Google email addresses allowed to log in |
@@ -48,7 +48,7 @@ Content-Type: application/json
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "url": "https://pages.eiaserinnys.me/p/a1b2c3d4e5f6"
+  "url": "https://pages.example.com/p/a1b2c3d4e5f6"
 }
 ```
 
@@ -74,4 +74,4 @@ With pm2 (production):
 pm2 start ecosystem.config.js
 ```
 
-The `ecosystem.config.js` sets `cwd` to the absolute symlink path managed by the deployment system (`/home/eias/services/pages/current`). Do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
+The `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system. Do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.

@@ -21,7 +21,7 @@ for (const key of REQUIRED_VARS) {
 const PORT = parseInt(process.env.PORT, 10);
 const PAGES_DIR = process.env.PAGES_DIR;
 const PAGES_API_TOKEN = process.env.PAGES_API_TOKEN;
-const BASE_URL = process.env.BASE_URL; // trailing slash 없음: https://pages.eiaserinnys.me
+const BASE_URL = process.env.BASE_URL; // trailing slash 없음, 예: https://pages.example.com
 const ALLOWED_EMAILS = process.env.ALLOWED_EMAILS.split(',').map((e) => e.trim());
 
 // ── PAGES_DIR 보장 ────────────────────────────────────────────────────────
