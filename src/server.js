@@ -11,6 +11,13 @@ const path = require('path');
 const { AnnotationStoreError, createAnnotationStore } = require('./annotationStore');
 const { issueAnnotationToken, verifyAnnotationToken } = require('./capabilityTokens');
 const { injectReviewConfig } = require('./reviewBundle');
+const { createWebhookSecretStore } = require('./webhookSecrets');
+const {
+  WebhookConfigurationError,
+  buildAnnotationWebhookEvent,
+  normalizeWebhookUrl,
+  queueAnnotationWebhook,
+} = require('./webhooks');
 
 // ── 필수 환경변수 검증 ──────────────────────────────────────────────────────
 const REQUIRED_VARS = [
@@ -31,9 +38,11 @@ const ANNOTATION_TOKEN_HEADER = 'X-Pages-Annotation-Token';
 
 // ── PAGES_DIR 보장 ────────────────────────────────────────────────────────
 fs.mkdirSync(PAGES_DIR, { recursive: true });
+const metaDbPath = path.join(PAGES_DIR, 'pages-meta.sqlite');
 const annotations = createAnnotationStore({
-  dbPath: path.join(PAGES_DIR, 'pages-meta.sqlite'),
+  dbPath: metaDbPath,
 });
+const webhookSecrets = createWebhookSecretStore({ dbPath: metaDbPath });
 
 // ── pageId 유틸 ───────────────────────────────────────────────────────────
 const newPageId = () => uuid().replace(/-/g, '').slice(0, 12);
@@ -138,14 +147,24 @@ app.get('/auth/logout', (req, res, next) => {
 // ── 라우트: API ───────────────────────────────────────────────────────────
 // POST /api/pages — HTML 업로드
 app.post('/api/pages', requireBearerToken, (req, res) => {
-  const { html, title, private: isPrivate, reviewable } = req.body;
+  const { html, title, private: isPrivate, reviewable, webhookUrl, webhookSecret } = req.body;
   if (!html || typeof html !== 'string') {
     return res.status(400).json({ error: 'html field is required' });
+  }
+  if (reviewable !== true && (webhookUrl || webhookSecret)) {
+    return res.status(400).json({ error: 'webhook requires reviewable=true' });
+  }
+  if (webhookSecret !== undefined && typeof webhookSecret !== 'string') {
+    return res.status(400).json({ error: 'webhookSecret must be a string' });
+  }
+  if (webhookSecret && !webhookUrl) {
+    return res.status(400).json({ error: 'webhookSecret requires webhookUrl' });
   }
 
   const id = newPageId();
   const wantsReviewable = reviewable === true;
   let review = null;
+  let webhook = null;
   let htmlToWrite = html;
   if (wantsReviewable) {
     const token = issueAnnotationToken({
@@ -161,6 +180,14 @@ app.post('/api/pages', requireBearerToken, (req, res) => {
       expiresAt: token.expiresAt,
     };
     htmlToWrite = injectReviewConfig(html, review);
+    try {
+      webhook = normalizeReviewWebhook(id, webhookUrl, webhookSecret);
+    } catch (err) {
+      if (err instanceof WebhookConfigurationError) {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
   }
 
   const meta = {
@@ -177,6 +204,16 @@ app.post('/api/pages', requireBearerToken, (req, res) => {
       tokenHeader: review.tokenHeader,
       expiresAt: review.expiresAt,
     };
+    if (webhook) {
+      meta.review.webhookUrl = webhook.url;
+      if (webhook.secretHash) {
+        meta.review.webhookSecretHash = webhook.secretHash;
+      }
+      review.webhook = {
+        enabled: true,
+        signed: Boolean(webhook.secretHash),
+      };
+    }
   }
 
   fs.writeFileSync(htmlPath(id), htmlToWrite, 'utf8');
@@ -222,6 +259,14 @@ app.put('/api/annotations/:revId', (req, res) => {
 
   try {
     const payload = annotations.replace(revId, req.body);
+    queueAnnotationWebhook({
+      url: meta.review?.webhookUrl,
+      secret: webhookSecrets.get(revId),
+      payload: buildAnnotationWebhookEvent({
+        revId,
+        count: payload.comments.length,
+      }),
+    });
     res.json({ ok: true, revId, count: payload.comments.length });
   } catch (err) {
     if (err instanceof AnnotationStoreError) {
@@ -384,6 +429,14 @@ function readAnnotationToken(req) {
   const auth = req.get('authorization') || '';
   const match = auth.match(/^Capability\s+(.+)$/i);
   return match ? match[1] : '';
+}
+
+function normalizeReviewWebhook(revId, webhookUrl, webhookSecret) {
+  const url = normalizeWebhookUrl(webhookUrl);
+  if (!url) return null;
+  const secret = typeof webhookSecret === 'string' ? webhookSecret : '';
+  const secretHash = webhookSecrets.save(revId, secret);
+  return { url, secretHash };
 }
 
 // ── 서버 시작 ─────────────────────────────────────────────────────────────

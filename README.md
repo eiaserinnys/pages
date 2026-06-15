@@ -45,7 +45,9 @@ Content-Type: application/json
   "html": "<html>...</html>",
   "title": "My Report",      // optional, defaults to "(제목 없음)"
   "private": false,          // optional, defaults to false
-  "reviewable": false        // optional, defaults to false
+  "reviewable": false,       // optional, defaults to false
+  "webhookUrl": "https://example.com/hook", // optional, requires reviewable=true
+  "webhookSecret": "<signing secret>"       // optional, requires webhookUrl
 }
 ```
 
@@ -69,10 +71,16 @@ If `reviewable` is `true`, the response also includes a rev-scoped capability to
     "annotationsUrl": "/api/annotations/a1b2c3d4e5f6",
     "tokenHeader": "X-Pages-Annotation-Token",
     "capabilityToken": "<rev-scoped-token>",
-    "expiresAt": "2026-06-29T00:00:00.000Z"
+    "expiresAt": "2026-06-29T00:00:00.000Z",
+    "webhook": {
+      "enabled": true,
+      "signed": true
+    }
   }
 }
 ```
+
+`webhookUrl` and `webhookSecret` are accepted only for reviewable pages. Page metadata stores `review.webhookUrl` and, when signing is enabled, `review.webhookSecretHash`; the raw signing secret is kept in the SQLite metadata store, not in the page JSON metadata or injected HTML.
 
 ### Annotation comments
 
@@ -95,6 +103,27 @@ Content-Type: application/json
 ```
 
 `PUT` replaces the full comment set for the revision. The capability token is scoped to the single `revId` and expires automatically.
+
+If the page has `review.webhookUrl`, a successful `PUT` queues a fire-and-forget webhook POST:
+
+```json
+{
+  "event": "pages.annotations.updated",
+  "rev_id": "a1b2c3d4e5f6",
+  "count": 3,
+  "annotations_url": "/api/annotations/a1b2c3d4e5f6",
+  "page_url": "/p/a1b2c3d4e5f6",
+  "timestamp": "2026-06-15T00:00:00.000Z"
+}
+```
+
+When a webhook secret is configured, the request includes:
+
+```
+X-Pages-Webhook-Signature: sha256=<hex hmac over the exact JSON body>
+```
+
+Webhook delivery has a 5 second timeout, logs failures to stderr, and does not retry. Delivery failure does not change the `PUT` response.
 
 ### Other endpoints
 
