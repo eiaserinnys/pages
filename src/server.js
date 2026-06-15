@@ -9,19 +9,19 @@ const { v4: uuid } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const { AnnotationStoreError, createAnnotationStore } = require('./annotationStore');
-const { issueAnnotationToken, verifyAnnotationToken } = require('./capabilityTokens');
+const { BundleStoreError, createBundleStore } = require('./bundleStore');
+const { verifyAnnotationToken } = require('./capabilityTokens');
 const { renderDashboard } = require('./dashboard');
 const {
-  DocumentStoreError,
   backfillDocumentMetadata,
   createDocumentStore,
   formatDocumentResponse,
   isValidDocumentSlug,
 } = require('./documentStore');
-const { injectReviewConfig } = require('./reviewBundle');
+const { createPageStorage } = require('./pageStorage');
+const { createPageUploadHandler } = require('./pageUpload');
 const { createWebhookSecretStore } = require('./webhookSecrets');
 const {
-  WebhookConfigurationError,
   buildAnnotationWebhookEvent,
   normalizeWebhookUrl,
   queueAnnotationWebhook,
@@ -51,6 +51,8 @@ const annotations = createAnnotationStore({
   dbPath: metaDbPath,
 });
 const documents = createDocumentStore({ dbPath: metaDbPath });
+const bundles = createBundleStore({ dbPath: metaDbPath, pagesDir: PAGES_DIR });
+const pageStorage = createPageStorage({ pagesDir: PAGES_DIR });
 const webhookSecrets = createWebhookSecretStore({ dbPath: metaDbPath });
 
 // ── pageId 유틸 ───────────────────────────────────────────────────────────
@@ -62,7 +64,7 @@ const isValidRevId = isValidPageId;
 const app = express();
 app.set('trust proxy', 1); // nginx 리버스 프록시 뒤에서 HTTPS 인식
 
-app.use(express.json({ limit: '10mb' })); // 10MB 초과 시 자동 413
+app.use(express.json({ limit: '75mb' })); // 50MB bundle + base64 JSON overhead
 
 app.use(
   session({
@@ -113,22 +115,6 @@ const requireBearerToken = (req, res, next) => {
   next();
 };
 
-// ── 파일 경로 헬퍼 ────────────────────────────────────────────────────────
-const htmlPath = (id) => path.join(PAGES_DIR, `${id}.html`);
-const metaPath = (id) => path.join(PAGES_DIR, `${id}.json`);
-
-const readMeta = (id) => {
-  try {
-    return JSON.parse(fs.readFileSync(metaPath(id), 'utf8'));
-  } catch {
-    return null;
-  }
-};
-
-const writeMeta = (id, data) => {
-  fs.writeFileSync(metaPath(id), JSON.stringify(data, null, 2), 'utf8');
-};
-
 backfillDocumentMetadata({ pagesDir: PAGES_DIR, documents });
 
 // ── 라우트: Auth ──────────────────────────────────────────────────────────
@@ -157,136 +143,17 @@ app.get('/auth/logout', (req, res, next) => {
 
 // ── 라우트: API ───────────────────────────────────────────────────────────
 // POST /api/pages — HTML 업로드
-app.post('/api/pages', requireBearerToken, (req, res) => {
-  const { html, title, private: isPrivate, reviewable, webhookUrl, webhookSecret, doc, owner } = req.body;
-  if (!html || typeof html !== 'string') {
-    return res.status(400).json({ error: 'html field is required' });
-  }
-  if (reviewable !== true && (webhookUrl || webhookSecret)) {
-    return res.status(400).json({ error: 'webhook requires reviewable=true' });
-  }
-  if (webhookSecret !== undefined && typeof webhookSecret !== 'string') {
-    return res.status(400).json({ error: 'webhookSecret must be a string' });
-  }
-  if (webhookSecret && !webhookUrl) {
-    return res.status(400).json({ error: 'webhookSecret requires webhookUrl' });
-  }
-  if (doc !== undefined && doc !== null && typeof doc !== 'string') {
-    return res.status(400).json({ error: 'doc must be a string' });
-  }
-  if (owner !== undefined && owner !== null && typeof owner !== 'string') {
-    return res.status(400).json({ error: 'owner must be a string' });
-  }
-
-  const id = newPageId();
-  const pageTitle = title || '(제목 없음)';
-  const createdAt = new Date().toISOString();
-  const docSlug = doc === undefined || doc === null ? '' : doc;
-  const wantsReviewable = reviewable === true;
-  let review = null;
-  let webhook = null;
-  let documentRecord = null;
-  let htmlToWrite = html;
-  if (wantsReviewable) {
-    const token = issueAnnotationToken({
-      revId: id,
-      secret: process.env.SESSION_SECRET,
-      ttlSeconds: ANNOTATION_TOKEN_TTL_SECONDS,
-    });
-    review = {
-      revId: id,
-      annotationsUrl: `/api/annotations/${id}`,
-      tokenHeader: ANNOTATION_TOKEN_HEADER,
-      capabilityToken: token.token,
-      expiresAt: token.expiresAt,
-    };
-    htmlToWrite = injectReviewConfig(html, review);
-    try {
-      webhook = normalizeReviewWebhook(id, webhookUrl, webhookSecret);
-    } catch (err) {
-      if (err instanceof WebhookConfigurationError) {
-        return res.status(400).json({ error: err.message });
-      }
-      throw err;
-    }
-  }
-  try {
-    if (docSlug) {
-      documentRecord = documents.appendRevision({
-        slug: docSlug,
-        revId: id,
-        title: pageTitle,
-        owner,
-        createdAt,
-      });
-    } else {
-      documents.ensureAnonymousRevision({
-        revId: id,
-        title: pageTitle,
-        owner,
-        createdAt,
-      });
-    }
-  } catch (err) {
-    if (err instanceof DocumentStoreError) {
-      return res.status(400).json({ error: err.message });
-    }
-    throw err;
-  }
-
-  const meta = {
-    id,
-    title: pageTitle,
-    createdAt,
-    private: isPrivate === true,
-  };
-  if (documentRecord?.slug) {
-    const revision = documentRecord.revision;
-    meta.document = {
-      docId: documentRecord.docId,
-      slug: documentRecord.slug,
-      owner: documentRecord.owner,
-      revId: id,
-      revNumber: revision.revNumber,
-      stableUrl: `/d/${documentRecord.slug}`,
-      revisionUrl: `/d/${documentRecord.slug}/r/${revision.revNumber}`,
-    };
-  }
-  if (review) {
-    meta.reviewable = true;
-    meta.review = {
-      revId: review.revId,
-      annotationsUrl: review.annotationsUrl,
-      tokenHeader: review.tokenHeader,
-      expiresAt: review.expiresAt,
-    };
-    if (webhook) {
-      meta.review.webhookUrl = webhook.url;
-      if (webhook.secretHash) {
-        meta.review.webhookSecretHash = webhook.secretHash;
-      }
-      review.webhook = {
-        enabled: true,
-        signed: Boolean(webhook.secretHash),
-      };
-    }
-  }
-
-  fs.writeFileSync(htmlPath(id), htmlToWrite, 'utf8');
-  writeMeta(id, meta);
-
-  const response = { id, url: `${BASE_URL}/p/${id}` };
-  if (documentRecord?.slug) {
-    const revision = documentRecord.revision;
-    response.docId = documentRecord.docId;
-    response.revId = id;
-    response.revNumber = revision.revNumber;
-    response.stableUrl = `${BASE_URL}/d/${documentRecord.slug}`;
-    response.revisionUrl = `${BASE_URL}/d/${documentRecord.slug}/r/${revision.revNumber}`;
-  }
-  if (review) response.review = review;
-  res.status(201).json(response);
-});
+app.post('/api/pages', requireBearerToken, createPageUploadHandler({
+  documents,
+  bundles,
+  pageStorage,
+  newPageId,
+  baseUrl: BASE_URL,
+  sessionSecret: process.env.SESSION_SECRET,
+  annotationTokenTtlSeconds: ANNOTATION_TOKEN_TTL_SECONDS,
+  annotationTokenHeader: ANNOTATION_TOKEN_HEADER,
+  normalizeReviewWebhook,
+}));
 
 // GET /api/documents/:slug — document metadata with revision list
 app.get('/api/documents/:slug', (req, res) => {
@@ -296,7 +163,7 @@ app.get('/api/documents/:slug', (req, res) => {
   const documentRecord = documents.getDocument(slug);
   if (!documentRecord) return res.status(404).json({ error: 'Not found' });
 
-  const latestMeta = documentRecord.latestRevision ? readMeta(documentRecord.latestRevision) : null;
+  const latestMeta = documentRecord.latestRevision ? pageStorage.readMeta(documentRecord.latestRevision) : null;
   if (latestMeta?.private && !req.isAuthenticated()) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -310,7 +177,7 @@ app.get('/api/annotations/:revId', (req, res) => {
   const { revId } = req.params;
   if (!isValidRevId(revId)) return res.status(404).json({ error: 'Not found' });
 
-  const meta = readMeta(revId);
+  const meta = pageStorage.readMeta(revId);
   if (!meta || meta.reviewable !== true) return res.status(404).json({ error: 'Not found' });
 
   try {
@@ -327,7 +194,7 @@ app.put('/api/annotations/:revId', (req, res) => {
   const { revId } = req.params;
   if (!isValidRevId(revId)) return res.status(404).json({ error: 'Not found' });
 
-  const meta = readMeta(revId);
+  const meta = pageStorage.readMeta(revId);
   if (!meta || meta.reviewable !== true) return res.status(404).json({ error: 'Not found' });
 
   const tokenResult = verifyAnnotationToken(readAnnotationToken(req), {
@@ -364,7 +231,7 @@ app.patch('/api/pages/:pageId/visibility', requireAuth, (req, res) => {
   const { pageId } = req.params;
   if (!isValidPageId(pageId)) return res.status(404).json({ error: 'Not found' });
 
-  const meta = readMeta(pageId);
+  const meta = pageStorage.readMeta(pageId);
   if (!meta) return res.status(404).json({ error: 'Not found' });
 
   const { private: isPrivate } = req.body;
@@ -373,7 +240,7 @@ app.patch('/api/pages/:pageId/visibility', requireAuth, (req, res) => {
   }
 
   meta.private = isPrivate;
-  writeMeta(pageId, meta);
+  pageStorage.writeMeta(pageId, meta);
   res.json({ id: pageId, private: meta.private });
 });
 
@@ -382,14 +249,11 @@ app.delete('/api/pages/:pageId', requireAuth, (req, res) => {
   const { pageId } = req.params;
   if (!isValidPageId(pageId)) return res.status(404).json({ error: 'Not found' });
 
-  const meta = readMeta(pageId);
+  const meta = pageStorage.readMeta(pageId);
   if (!meta) return res.status(404).json({ error: 'Not found' });
 
   try {
-    fs.unlinkSync(htmlPath(pageId));
-  } catch { /* 이미 없으면 무시 */ }
-  try {
-    fs.unlinkSync(metaPath(pageId));
+    pageStorage.deletePage(pageId);
   } catch { /* 이미 없으면 무시 */ }
 
   res.status(204).end();
@@ -417,18 +281,49 @@ app.get('/d/:slug/r/:revNumber', (req, res, next) => {
   const revision = documents.getRevisionBySlugNumber(slug, revisionNumber);
   if (!revision) return res.status(404).send('<h1>404 Not Found</h1>');
 
-  return sendPageHtml(req, res, next, revision.revId);
+  return sendPageAsset(req, res, next, revision.revId);
+});
+
+app.get('/d/:slug/r/:revNumber/*', (req, res, next) => {
+  const { slug, revNumber } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
+  const revisionNumber = Number(revNumber);
+  if (!Number.isInteger(revisionNumber) || revisionNumber < 1) {
+    return res.status(404).send('<h1>404 Not Found</h1>');
+  }
+
+  const revision = documents.getRevisionBySlugNumber(slug, revisionNumber);
+  if (!revision) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  return sendPageAsset(req, res, next, revision.revId, req.params[0]);
+});
+
+app.get('/d/:slug/*', (req, res, next) => {
+  const { slug } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  const documentRecord = documents.getDocument(slug);
+  if (!documentRecord?.revision) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  return sendPageAsset(req, res, next, documentRecord.revision.revId, req.params[0]);
 });
 
 app.get('/p/:pageId', (req, res, next) => {
   const { pageId } = req.params;
   if (!isValidPageId(pageId)) return res.status(404).send('<h1>404 Not Found</h1>');
 
-  return sendPageHtml(req, res, next, pageId);
+  return sendPageAsset(req, res, next, pageId);
 });
 
-function sendPageHtml(req, res, next, pageId) {
-  const meta = readMeta(pageId);
+app.get('/p/:pageId/*', (req, res, next) => {
+  const { pageId } = req.params;
+  if (!isValidPageId(pageId)) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  return sendPageAsset(req, res, next, pageId, req.params[0]);
+});
+
+function sendPageAsset(req, res, next, pageId, assetPath = '') {
+  const meta = pageStorage.readMeta(pageId);
   if (!meta) return res.status(404).send('<h1>404 Not Found</h1>');
 
   if (meta.private && !req.isAuthenticated()) {
@@ -436,29 +331,41 @@ function sendPageHtml(req, res, next, pageId) {
   }
 
   try {
-    const html = fs.readFileSync(htmlPath(pageId), 'utf8');
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch {
-    res.status(404).send('<h1>404 Not Found</h1>');
+    const asset = bundles.getAsset(pageId, assetPath);
+    if (asset) return streamBundleAsset(res, asset);
+  } catch (err) {
+    if (err instanceof BundleStoreError) {
+      return res.status(404).send('<h1>404 Not Found</h1>');
+    }
+    throw err;
   }
+  if (assetPath) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  try {
+    const html = pageStorage.readHtml(pageId);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(html);
+  } catch {
+    return res.status(404).send('<h1>404 Not Found</h1>');
+  }
+}
+
+function streamBundleAsset(res, asset) {
+  const filePath = bundles.resolveAssetFile(asset);
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return res.status(404).send('<h1>404 Not Found</h1>');
+  } catch {
+    return res.status(404).send('<h1>404 Not Found</h1>');
+  }
+  res.setHeader('Content-Type', asset.contentType);
+  res.setHeader('Content-Length', String(asset.sizeBytes));
+  return fs.createReadStream(filePath).pipe(res);
 }
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────
 app.get('/', requireAuth, (req, res) => {
-  // PAGES_DIR의 모든 .json 파일에서 메타 읽기
-  const pages = [];
-  try {
-    const files = fs.readdirSync(PAGES_DIR).filter((f) => f.endsWith('.json'));
-    for (const file of files) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(path.join(PAGES_DIR, file), 'utf8'));
-        pages.push(meta);
-      } catch { /* 손상된 파일 무시 */ }
-    }
-  } catch { /* PAGES_DIR 읽기 실패 무시 */ }
-
-  // createdAt 내림차순
+  const pages = pageStorage.listMetas();
   pages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');

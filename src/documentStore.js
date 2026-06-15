@@ -48,6 +48,23 @@ function createDocumentStore({ dbPath }) {
     FROM revisions
     WHERE rev_id = ?
   `);
+  const selectRevisionDocument = db.prepare(`
+    SELECT
+      d.doc_id,
+      d.slug,
+      d.title,
+      d.owner,
+      d.latest_revision,
+      d.created_at AS doc_created_at,
+      d.updated_at,
+      r.rev_id,
+      r.rev_number,
+      r.status,
+      r.created_at AS rev_created_at
+    FROM revisions r
+    JOIN documents d ON d.doc_id = r.doc_id
+    WHERE r.rev_id = ?
+  `);
   const selectRevisionBySlugNumber = db.prepare(`
     SELECT r.rev_id, r.doc_id, r.rev_number, r.status, r.created_at
     FROM revisions r
@@ -242,6 +259,10 @@ function createDocumentStore({ dbPath }) {
       const row = selectRevision.get(revId);
       return row ? formatRevisionRow(row) : null;
     },
+    getRevisionDocument(revId) {
+      const row = selectRevisionDocument.get(revId);
+      return row ? formatRevisionDocumentRow(row) : null;
+    },
     getRevisionBySlugNumber(slug, revNumber) {
       const row = selectRevisionBySlugNumber.get(normalizeSlug(slug), positiveInteger(revNumber));
       return row ? formatRevisionRow(row) : null;
@@ -251,7 +272,21 @@ function createDocumentStore({ dbPath }) {
     },
     getDocumentById(docId) {
       const doc = selectById.get(docId);
-      return doc ? getDocumentSnapshot(doc.slug) : null;
+      if (!doc) return null;
+      if (doc.slug) return getDocumentSnapshot(doc.slug);
+      const revisions = selectRevisionsByDoc.all(doc.doc_id).map(formatRevisionRow);
+      const latestRevision = revisions.find((revision) => revision.revId === doc.latest_revision) || null;
+      return {
+        docId: doc.doc_id,
+        slug: null,
+        title: doc.title,
+        owner: doc.owner,
+        latestRevision: doc.latest_revision,
+        createdAt: doc.created_at,
+        updatedAt: doc.updated_at,
+        revision: latestRevision,
+        revisions,
+      };
     },
   };
 }
@@ -280,6 +315,25 @@ function formatRevisionRow(row) {
     revNumber: row.rev_number,
     status: row.status,
     createdAt: row.created_at,
+  };
+}
+
+function formatRevisionDocumentRow(row) {
+  return {
+    docId: row.doc_id,
+    slug: row.slug,
+    title: row.title,
+    owner: row.owner,
+    latestRevision: row.latest_revision,
+    createdAt: row.doc_created_at,
+    updatedAt: row.updated_at,
+    revision: {
+      revId: row.rev_id,
+      docId: row.doc_id,
+      revNumber: row.rev_number,
+      status: row.status,
+      createdAt: row.rev_created_at,
+    },
   };
 }
 
