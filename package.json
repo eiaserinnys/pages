@@ -15,5 +15,8 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "uuid": "^11.1.1"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.10.1": true
   }
 }
