@@ -77,6 +77,25 @@ function createDocumentStore({ dbPath }) {
     WHERE doc_id = ?
     ORDER BY rev_number DESC
   `);
+  const selectDocuments = db.prepare(`
+    SELECT
+      d.doc_id,
+      d.slug,
+      d.title,
+      d.owner,
+      d.latest_revision,
+      d.created_at,
+      d.updated_at,
+      lr.rev_number AS latest_rev_number,
+      lr.created_at AS latest_rev_created_at,
+      COUNT(r.rev_id) AS revision_count
+    FROM documents d
+    LEFT JOIN revisions lr ON lr.rev_id = d.latest_revision
+    LEFT JOIN revisions r ON r.doc_id = d.doc_id
+    WHERE d.slug IS NOT NULL
+    GROUP BY d.doc_id
+    ORDER BY d.updated_at DESC
+  `);
   const selectMaxRevisionNumber = db.prepare(`
     SELECT COALESCE(MAX(rev_number), 0) AS max_rev_number
     FROM revisions
@@ -252,6 +271,9 @@ function createDocumentStore({ dbPath }) {
         createdAt: meta.createdAt,
       });
     },
+    listDocuments() {
+      return selectDocuments.all().map(formatDocumentListRow);
+    },
     getDocument(slug) {
       return getDocumentSnapshot(normalizeSlug(slug));
     },
@@ -334,6 +356,21 @@ function formatRevisionDocumentRow(row) {
       status: row.status,
       createdAt: row.rev_created_at,
     },
+  };
+}
+
+function formatDocumentListRow(row) {
+  return {
+    docId: row.doc_id,
+    slug: row.slug,
+    title: row.title,
+    owner: row.owner,
+    latestRevision: row.latest_revision,
+    latestRevNumber: row.latest_rev_number,
+    latestRevCreatedAt: row.latest_rev_created_at,
+    revisionCount: row.revision_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

@@ -54,3 +54,32 @@ test('annotation store rejects comments without a stable id', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('annotation store counts comments by revision id', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pages-annotations-'));
+  const store = createAnnotationStore({ dbPath: path.join(root, 'meta.sqlite') });
+  try {
+    store.replace('aaa111aaa111', {
+      schema_version: '1.0',
+      comments: [
+        { id: 'cmt_1', comment: 'first' },
+        { id: 'cmt_2', comment: 'second' },
+      ],
+    });
+    store.replace('bbb222bbb222', {
+      schema_version: '1.0',
+      comments: [
+        { id: 'cmt_3', comment: 'third' },
+      ],
+    });
+
+    assert.deepEqual(store.countByRevisionIds(['aaa111aaa111', 'bbb222bbb222', 'ccc333ccc333']), {
+      aaa111aaa111: 2,
+      bbb222bbb222: 1,
+      ccc333ccc333: 0,
+    });
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
