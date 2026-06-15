@@ -8,6 +8,9 @@ const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
 const { v4: uuid } = require('uuid');
 const fs = require('fs');
 const path = require('path');
+const { AnnotationStoreError, createAnnotationStore } = require('./annotationStore');
+const { issueAnnotationToken, verifyAnnotationToken } = require('./capabilityTokens');
+const { injectReviewConfig } = require('./reviewBundle');
 
 // ── 필수 환경변수 검증 ──────────────────────────────────────────────────────
 const REQUIRED_VARS = [
@@ -23,13 +26,19 @@ const PAGES_DIR = process.env.PAGES_DIR;
 const PAGES_API_TOKEN = process.env.PAGES_API_TOKEN;
 const BASE_URL = process.env.BASE_URL; // trailing slash 없음, 예: https://pages.example.com
 const ALLOWED_EMAILS = process.env.ALLOWED_EMAILS.split(',').map((e) => e.trim());
+const ANNOTATION_TOKEN_TTL_SECONDS = 14 * 24 * 60 * 60;
+const ANNOTATION_TOKEN_HEADER = 'X-Pages-Annotation-Token';
 
 // ── PAGES_DIR 보장 ────────────────────────────────────────────────────────
 fs.mkdirSync(PAGES_DIR, { recursive: true });
+const annotations = createAnnotationStore({
+  dbPath: path.join(PAGES_DIR, 'pages-meta.sqlite'),
+});
 
 // ── pageId 유틸 ───────────────────────────────────────────────────────────
 const newPageId = () => uuid().replace(/-/g, '').slice(0, 12);
 const isValidPageId = (id) => /^[0-9a-f]{12}$/.test(id);
+const isValidRevId = isValidPageId;
 
 // ── Express 앱 설정 ────────────────────────────────────────────────────────
 const app = express();
@@ -129,23 +138,98 @@ app.get('/auth/logout', (req, res, next) => {
 // ── 라우트: API ───────────────────────────────────────────────────────────
 // POST /api/pages — HTML 업로드
 app.post('/api/pages', requireBearerToken, (req, res) => {
-  const { html, title, private: isPrivate } = req.body;
+  const { html, title, private: isPrivate, reviewable } = req.body;
   if (!html || typeof html !== 'string') {
     return res.status(400).json({ error: 'html field is required' });
   }
 
   const id = newPageId();
+  const wantsReviewable = reviewable === true;
+  let review = null;
+  let htmlToWrite = html;
+  if (wantsReviewable) {
+    const token = issueAnnotationToken({
+      revId: id,
+      secret: process.env.SESSION_SECRET,
+      ttlSeconds: ANNOTATION_TOKEN_TTL_SECONDS,
+    });
+    review = {
+      revId: id,
+      annotationsUrl: `/api/annotations/${id}`,
+      tokenHeader: ANNOTATION_TOKEN_HEADER,
+      capabilityToken: token.token,
+      expiresAt: token.expiresAt,
+    };
+    htmlToWrite = injectReviewConfig(html, review);
+  }
+
   const meta = {
     id,
     title: title || '(제목 없음)',
     createdAt: new Date().toISOString(),
     private: isPrivate === true,
   };
+  if (review) {
+    meta.reviewable = true;
+    meta.review = {
+      revId: review.revId,
+      annotationsUrl: review.annotationsUrl,
+      tokenHeader: review.tokenHeader,
+      expiresAt: review.expiresAt,
+    };
+  }
 
-  fs.writeFileSync(htmlPath(id), html, 'utf8');
+  fs.writeFileSync(htmlPath(id), htmlToWrite, 'utf8');
   writeMeta(id, meta);
 
-  res.status(201).json({ id, url: `${BASE_URL}/p/${id}` });
+  const response = { id, url: `${BASE_URL}/p/${id}` };
+  if (review) response.review = review;
+  res.status(201).json(response);
+});
+
+// GET /api/annotations/:revId — reviewable revision comments
+app.get('/api/annotations/:revId', (req, res) => {
+  const { revId } = req.params;
+  if (!isValidRevId(revId)) return res.status(404).json({ error: 'Not found' });
+
+  const meta = readMeta(revId);
+  if (!meta || meta.reviewable !== true) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(annotations.list(revId));
+  } catch (err) {
+    console.error('[pages] failed to read annotations', err);
+    res.status(500).json({ error: 'Failed to read annotations' });
+  }
+});
+
+// PUT /api/annotations/:revId — full replacement for one reviewable revision
+app.put('/api/annotations/:revId', (req, res) => {
+  const { revId } = req.params;
+  if (!isValidRevId(revId)) return res.status(404).json({ error: 'Not found' });
+
+  const meta = readMeta(revId);
+  if (!meta || meta.reviewable !== true) return res.status(404).json({ error: 'Not found' });
+
+  const tokenResult = verifyAnnotationToken(readAnnotationToken(req), {
+    revId,
+    secret: process.env.SESSION_SECRET,
+  });
+  if (!tokenResult.ok) {
+    return res.status(401).json({ error: 'Unauthorized', reason: tokenResult.error });
+  }
+
+  try {
+    const payload = annotations.replace(revId, req.body);
+    res.json({ ok: true, revId, count: payload.comments.length });
+  } catch (err) {
+    if (err instanceof AnnotationStoreError) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[pages] failed to write annotations', err);
+    res.status(500).json({ error: 'Failed to write annotations' });
+  }
 });
 
 // PATCH /api/pages/:pageId/visibility — 공개/비공개 전환
@@ -292,6 +376,14 @@ function escHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function readAnnotationToken(req) {
+  const headerToken = req.get(ANNOTATION_TOKEN_HEADER);
+  if (headerToken) return headerToken;
+  const auth = req.get('authorization') || '';
+  const match = auth.match(/^Capability\s+(.+)$/i);
+  return match ? match[1] : '';
 }
 
 // ── 서버 시작 ─────────────────────────────────────────────────────────────
