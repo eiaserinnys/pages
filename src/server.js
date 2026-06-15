@@ -267,7 +267,8 @@ app.get('/d/:slug', (req, res) => {
   const documentRecord = documents.getDocument(slug);
   if (!documentRecord?.revision) return res.status(404).send('<h1>404 Not Found</h1>');
 
-  res.redirect(302, `/d/${slug}/r/${documentRecord.revision.revNumber}`);
+  const latestPath = `/d/${slug}/r/${documentRecord.revision.revNumber}`;
+  res.redirect(302, appendOriginalQuery(req, hasTrailingSlash(req) ? `${latestPath}/` : latestPath));
 });
 
 app.get('/d/:slug/r/:revNumber', (req, res, next) => {
@@ -280,6 +281,7 @@ app.get('/d/:slug/r/:revNumber', (req, res, next) => {
 
   const revision = documents.getRevisionBySlugNumber(slug, revisionNumber);
   if (!revision) return res.status(404).send('<h1>404 Not Found</h1>');
+  if (!hasTrailingSlash(req)) return redirectToTrailingSlash(req, res);
 
   return sendPageAsset(req, res, next, revision.revId);
 });
@@ -311,6 +313,7 @@ app.get('/d/:slug/*', (req, res, next) => {
 app.get('/p/:pageId', (req, res, next) => {
   const { pageId } = req.params;
   if (!isValidPageId(pageId)) return res.status(404).send('<h1>404 Not Found</h1>');
+  if (!hasTrailingSlash(req)) return redirectToTrailingSlash(req, res);
 
   return sendPageAsset(req, res, next, pageId);
 });
@@ -361,6 +364,22 @@ function streamBundleAsset(res, asset) {
   res.setHeader('Content-Type', asset.contentType);
   res.setHeader('Content-Length', String(asset.sizeBytes));
   return fs.createReadStream(filePath).pipe(res);
+}
+
+function hasTrailingSlash(req) {
+  return req.path.endsWith('/');
+}
+
+function redirectToTrailingSlash(req, res) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  const pathname = queryIndex === -1 ? req.originalUrl : req.originalUrl.slice(0, queryIndex);
+  const query = queryIndex === -1 ? '' : req.originalUrl.slice(queryIndex);
+  return res.redirect(302, `${pathname}/${query}`);
+}
+
+function appendOriginalQuery(req, targetPath) {
+  const queryIndex = req.originalUrl.indexOf('?');
+  return queryIndex === -1 ? targetPath : `${targetPath}${req.originalUrl.slice(queryIndex)}`;
 }
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────
