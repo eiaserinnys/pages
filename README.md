@@ -8,11 +8,12 @@ A lightweight HTML page hosting service. Clients upload HTML via a Bearer-token-
 
 - **HTML upload** — POST any HTML string and get back a stable `/p/:id` URL
 - **Document revisions** — opt-in `/d/:slug` stable URLs keep a revision history without changing anonymous uploads
+- **Multifile bundles** — opt-in manifest upload serves `index.html` plus relative assets under `/p/:id/...` and `/d/:slug/...`
 - **Review annotations** — opt-in reviewable pages receive rev-scoped comment storage
 - **Public / private toggle** — pages default to public; flip visibility from the dashboard
 - **Google OAuth dashboard** — only allowlisted Google accounts can access `/` and manage pages
 - **Bearer token auth** — API writes require `Authorization: Bearer <token>`
-- **10 MB limit** — requests larger than 10 MB are rejected automatically
+- **Bundle limits** — uploads are capped at 200 files and 50 MB per bundle
 
 ## Environment Variables
 
@@ -100,6 +101,31 @@ If `doc` is present, the page is appended as a new immutable revision under that
 
 `webhookUrl` and `webhookSecret` are accepted only for reviewable pages. Page metadata stores `review.webhookUrl` and, when signing is enabled, `review.webhookSecretHash`; the raw signing secret is kept in the SQLite metadata store, not in the page JSON metadata or injected HTML.
 
+For multifile bundles, send `files` instead of `html`. Each file is base64 encoded and addressed by a safe relative POSIX path. The single HTML upload above is treated internally as a one-file bundle with `index.html`, but its response remains exactly `{ id, url }` unless optional features such as `doc` or `reviewable` are requested.
+
+```json
+{
+  "title": "My Report",
+  "entrypoint": "index.html",
+  "files": [
+    {
+      "path": "index.html",
+      "content": "PGh0bWw+Li4uPC9odG1sPg==",
+      "encoding": "base64",
+      "contentType": "text/html; charset=utf-8"
+    },
+    {
+      "path": "assets/style.css",
+      "content": "Ym9keSB7IGNvbG9yOiByZWQ7IH0=",
+      "encoding": "base64",
+      "contentType": "text/css; charset=utf-8"
+    }
+  ]
+}
+```
+
+Bundle paths reject traversal and ambiguous platform paths: `..`, absolute paths, backslashes, NULL bytes, empty segments, and Windows reserved names such as `CON` and `NUL`. Server limits are 200 files and 50 MB total bytes per bundle.
+
 ### Document revisions
 
 ```
@@ -113,6 +139,14 @@ GET /d/:slug/r/:revNumber
 ```
 
 Serves that fixed revision's HTML. Revision URLs do not move when newer revisions are published.
+
+```
+GET /p/:pageId/:path
+GET /d/:slug/:path
+GET /d/:slug/r/:revNumber/:path
+```
+
+Serve bundle assets from the immutable page, the latest document revision, or a fixed revision. Unknown manifest paths return `404`; content type comes from the stored manifest or extension inference.
 
 ```
 GET /api/documents/:slug
@@ -193,8 +227,11 @@ Webhook delivery has a 5 second timeout, logs failures to stderr, and does not r
 | Method   | Path                             | Auth          | Description            |
 |----------|----------------------------------|---------------|------------------------|
 | `GET`    | `/p/:pageId`                     | none (public) | Serve the page         |
+| `GET`    | `/p/:pageId/:path`               | none (public) | Serve page bundle asset |
 | `GET`    | `/d/:slug`                       | none (public) | Redirect to latest revision |
+| `GET`    | `/d/:slug/:path`                 | none (public) | Serve latest revision bundle asset |
 | `GET`    | `/d/:slug/r/:revNumber`          | none (public) | Serve a fixed revision |
+| `GET`    | `/d/:slug/r/:revNumber/:path`    | none (public) | Serve fixed revision bundle asset |
 | `GET`    | `/api/documents/:slug`           | none          | Show document metadata |
 | `GET`    | `/api/annotations/:revId`        | none          | List review comments   |
 | `PUT`    | `/api/annotations/:revId`        | capability    | Replace review comments |

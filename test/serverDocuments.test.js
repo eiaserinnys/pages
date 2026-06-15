@@ -112,6 +112,87 @@ test('review comments stay scoped to the revision that received them', async () 
   }
 });
 
+test('server publishes and serves multifile bundles for anonymous, document, and reviewable pages', async () => {
+  const server = await startPagesServer();
+  try {
+    const anonymous = await postPage(server, {
+      title: 'Bundle',
+      files: encodedFiles({
+        'index.html': '<!doctype html><html><head><link rel="stylesheet" href="assets/style.css"></head><body>Bundle</body></html>',
+        'assets/style.css': 'body { color: rgb(1, 2, 3); }',
+      }),
+    });
+    assert.deepEqual(Object.keys(anonymous).sort(), ['id', 'url']);
+    assert.match(await fetchText(`${server.baseUrl}/p/${anonymous.id}`), /Bundle/);
+
+    const style = await fetch(`${server.baseUrl}/p/${anonymous.id}/assets/style.css`);
+    assert.equal(style.status, 200);
+    assert.match(style.headers.get('content-type'), /^text\/css/);
+    assert.equal(await style.text(), 'body { color: rgb(1, 2, 3); }');
+
+    const missing = await fetch(`${server.baseUrl}/p/${anonymous.id}/assets/missing.css`);
+    assert.equal(missing.status, 404);
+
+    const doc = await postPage(server, {
+      title: 'Doc Bundle',
+      doc: 'bundle-doc',
+      files: encodedFiles({
+        'index.html': '<!doctype html><html><body>Doc bundle</body></html>',
+        'assets/style.css': '.doc { color: green; }',
+      }),
+    });
+    assert.equal(doc.revNumber, 1);
+    const fixedStyle = await fetch(`${server.baseUrl}/d/bundle-doc/r/1/assets/style.css`);
+    assert.equal(fixedStyle.status, 200);
+    assert.equal(await fixedStyle.text(), '.doc { color: green; }');
+    const latestStyle = await fetch(`${server.baseUrl}/d/bundle-doc/assets/style.css`);
+    assert.equal(latestStyle.status, 200);
+    assert.equal(await latestStyle.text(), '.doc { color: green; }');
+
+    const reviewable = await postPage(server, {
+      title: 'Reviewable Bundle',
+      reviewable: true,
+      files: encodedFiles({
+        'index.html': '<!doctype html><html><head></head><body>Reviewable</body></html>',
+        'assets/review-comments.js': 'window.reviewLoaded = true;',
+      }),
+    });
+    assert.ok(reviewable.review.capabilityToken);
+    const patchedHtml = await fetchText(`${server.baseUrl}/p/${reviewable.id}`);
+    assert.match(patchedHtml, /window\.__PAGES_REVIEW__/);
+    const reviewScript = await fetch(`${server.baseUrl}/p/${reviewable.id}/assets/review-comments.js`);
+    assert.equal(reviewScript.status, 200);
+    assert.equal(await reviewScript.text(), 'window.reviewLoaded = true;');
+  } finally {
+    await stopPagesServer(server);
+  }
+});
+
+test('server rejects unsafe bundle paths', async () => {
+  const server = await startPagesServer();
+  try {
+    const traversal = await postPage(server, {
+      title: 'Bad Bundle',
+      entrypoint: '../etc/passwd',
+      files: encodedFiles({
+        '../etc/passwd': 'nope',
+      }),
+    }, { expectedStatus: 400 });
+    assert.match(traversal.error, /must not contain|relative/);
+
+    const absolute = await postPage(server, {
+      title: 'Bad Bundle',
+      entrypoint: '/index.html',
+      files: encodedFiles({
+        '/index.html': 'nope',
+      }),
+    }, { expectedStatus: 400 });
+    assert.match(absolute.error, /relative/);
+  } finally {
+    await stopPagesServer(server);
+  }
+});
+
 async function startPagesServer() {
   const port = await getFreePort();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pages-server-'));
@@ -168,6 +249,14 @@ function waitForServer(child, logs) {
       }
     });
   });
+}
+
+function encodedFiles(files) {
+  return Object.entries(files).map(([filePath, content]) => ({
+    path: filePath,
+    content: Buffer.from(content, 'utf8').toString('base64'),
+    encoding: 'base64',
+  }));
 }
 
 async function postPage(server, payload, { expectedStatus = 201 } = {}) {
