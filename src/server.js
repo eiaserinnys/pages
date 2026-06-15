@@ -10,6 +10,14 @@ const fs = require('fs');
 const path = require('path');
 const { AnnotationStoreError, createAnnotationStore } = require('./annotationStore');
 const { issueAnnotationToken, verifyAnnotationToken } = require('./capabilityTokens');
+const { renderDashboard } = require('./dashboard');
+const {
+  DocumentStoreError,
+  backfillDocumentMetadata,
+  createDocumentStore,
+  formatDocumentResponse,
+  isValidDocumentSlug,
+} = require('./documentStore');
 const { injectReviewConfig } = require('./reviewBundle');
 const { createWebhookSecretStore } = require('./webhookSecrets');
 const {
@@ -42,6 +50,7 @@ const metaDbPath = path.join(PAGES_DIR, 'pages-meta.sqlite');
 const annotations = createAnnotationStore({
   dbPath: metaDbPath,
 });
+const documents = createDocumentStore({ dbPath: metaDbPath });
 const webhookSecrets = createWebhookSecretStore({ dbPath: metaDbPath });
 
 // ── pageId 유틸 ───────────────────────────────────────────────────────────
@@ -120,6 +129,8 @@ const writeMeta = (id, data) => {
   fs.writeFileSync(metaPath(id), JSON.stringify(data, null, 2), 'utf8');
 };
 
+backfillDocumentMetadata({ pagesDir: PAGES_DIR, documents });
+
 // ── 라우트: Auth ──────────────────────────────────────────────────────────
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
@@ -147,7 +158,7 @@ app.get('/auth/logout', (req, res, next) => {
 // ── 라우트: API ───────────────────────────────────────────────────────────
 // POST /api/pages — HTML 업로드
 app.post('/api/pages', requireBearerToken, (req, res) => {
-  const { html, title, private: isPrivate, reviewable, webhookUrl, webhookSecret } = req.body;
+  const { html, title, private: isPrivate, reviewable, webhookUrl, webhookSecret, doc, owner } = req.body;
   if (!html || typeof html !== 'string') {
     return res.status(400).json({ error: 'html field is required' });
   }
@@ -160,11 +171,21 @@ app.post('/api/pages', requireBearerToken, (req, res) => {
   if (webhookSecret && !webhookUrl) {
     return res.status(400).json({ error: 'webhookSecret requires webhookUrl' });
   }
+  if (doc !== undefined && doc !== null && typeof doc !== 'string') {
+    return res.status(400).json({ error: 'doc must be a string' });
+  }
+  if (owner !== undefined && owner !== null && typeof owner !== 'string') {
+    return res.status(400).json({ error: 'owner must be a string' });
+  }
 
   const id = newPageId();
+  const pageTitle = title || '(제목 없음)';
+  const createdAt = new Date().toISOString();
+  const docSlug = doc === undefined || doc === null ? '' : doc;
   const wantsReviewable = reviewable === true;
   let review = null;
   let webhook = null;
+  let documentRecord = null;
   let htmlToWrite = html;
   if (wantsReviewable) {
     const token = issueAnnotationToken({
@@ -189,13 +210,48 @@ app.post('/api/pages', requireBearerToken, (req, res) => {
       throw err;
     }
   }
+  try {
+    if (docSlug) {
+      documentRecord = documents.appendRevision({
+        slug: docSlug,
+        revId: id,
+        title: pageTitle,
+        owner,
+        createdAt,
+      });
+    } else {
+      documents.ensureAnonymousRevision({
+        revId: id,
+        title: pageTitle,
+        owner,
+        createdAt,
+      });
+    }
+  } catch (err) {
+    if (err instanceof DocumentStoreError) {
+      return res.status(400).json({ error: err.message });
+    }
+    throw err;
+  }
 
   const meta = {
     id,
-    title: title || '(제목 없음)',
-    createdAt: new Date().toISOString(),
+    title: pageTitle,
+    createdAt,
     private: isPrivate === true,
   };
+  if (documentRecord?.slug) {
+    const revision = documentRecord.revision;
+    meta.document = {
+      docId: documentRecord.docId,
+      slug: documentRecord.slug,
+      owner: documentRecord.owner,
+      revId: id,
+      revNumber: revision.revNumber,
+      stableUrl: `/d/${documentRecord.slug}`,
+      revisionUrl: `/d/${documentRecord.slug}/r/${revision.revNumber}`,
+    };
+  }
   if (review) {
     meta.reviewable = true;
     meta.review = {
@@ -220,8 +276,33 @@ app.post('/api/pages', requireBearerToken, (req, res) => {
   writeMeta(id, meta);
 
   const response = { id, url: `${BASE_URL}/p/${id}` };
+  if (documentRecord?.slug) {
+    const revision = documentRecord.revision;
+    response.docId = documentRecord.docId;
+    response.revId = id;
+    response.revNumber = revision.revNumber;
+    response.stableUrl = `${BASE_URL}/d/${documentRecord.slug}`;
+    response.revisionUrl = `${BASE_URL}/d/${documentRecord.slug}/r/${revision.revNumber}`;
+  }
   if (review) response.review = review;
   res.status(201).json(response);
+});
+
+// GET /api/documents/:slug — document metadata with revision list
+app.get('/api/documents/:slug', (req, res) => {
+  const { slug } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).json({ error: 'Not found' });
+
+  const documentRecord = documents.getDocument(slug);
+  if (!documentRecord) return res.status(404).json({ error: 'Not found' });
+
+  const latestMeta = documentRecord.latestRevision ? readMeta(documentRecord.latestRevision) : null;
+  if (latestMeta?.private && !req.isAuthenticated()) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(formatDocumentResponse(documentRecord, BASE_URL));
 });
 
 // GET /api/annotations/:revId — reviewable revision comments
@@ -258,6 +339,7 @@ app.put('/api/annotations/:revId', (req, res) => {
   }
 
   try {
+    documents.ensureRevisionFromMeta(meta);
     const payload = annotations.replace(revId, req.body);
     queueAnnotationWebhook({
       url: meta.review?.webhookUrl,
@@ -314,10 +396,38 @@ app.delete('/api/pages/:pageId', requireAuth, (req, res) => {
 });
 
 // ── 라우트: 페이지 서빙 ───────────────────────────────────────────────────
+app.get('/d/:slug', (req, res) => {
+  const { slug } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  const documentRecord = documents.getDocument(slug);
+  if (!documentRecord?.revision) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  res.redirect(302, `/d/${slug}/r/${documentRecord.revision.revNumber}`);
+});
+
+app.get('/d/:slug/r/:revNumber', (req, res, next) => {
+  const { slug, revNumber } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
+  const revisionNumber = Number(revNumber);
+  if (!Number.isInteger(revisionNumber) || revisionNumber < 1) {
+    return res.status(404).send('<h1>404 Not Found</h1>');
+  }
+
+  const revision = documents.getRevisionBySlugNumber(slug, revisionNumber);
+  if (!revision) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  return sendPageHtml(req, res, next, revision.revId);
+});
+
 app.get('/p/:pageId', (req, res, next) => {
   const { pageId } = req.params;
   if (!isValidPageId(pageId)) return res.status(404).send('<h1>404 Not Found</h1>');
 
+  return sendPageHtml(req, res, next, pageId);
+});
+
+function sendPageHtml(req, res, next, pageId) {
   const meta = readMeta(pageId);
   if (!meta) return res.status(404).send('<h1>404 Not Found</h1>');
 
@@ -332,7 +442,7 @@ app.get('/p/:pageId', (req, res, next) => {
   } catch {
     res.status(404).send('<h1>404 Not Found</h1>');
   }
-});
+}
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────
 app.get('/', requireAuth, (req, res) => {
@@ -351,77 +461,9 @@ app.get('/', requireAuth, (req, res) => {
   // createdAt 내림차순
   pages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-  const rows = pages.map((p) => {
-    const url = `${BASE_URL}/p/${p.id}`;
-    const visLabel = p.private ? '🔒 비공개' : '🌐 공개';
-    const toggleLabel = p.private ? '공개로 전환' : '비공개로 전환';
-    const toggleValue = p.private ? 'false' : 'true';
-    return `
-      <tr>
-        <td><a href="${url}" target="_blank">${escHtml(p.title)}</a></td>
-        <td>${visLabel}</td>
-        <td>${escHtml(p.createdAt)}</td>
-        <td>
-          <button onclick="toggleVisibility('${p.id}', ${toggleValue})">${toggleLabel}</button>
-          <button onclick="deletePage('${p.id}')" style="color:red">삭제</button>
-        </td>
-      </tr>`;
-  }).join('');
-
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(`<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pages 대시보드</title>
-  <style>
-    body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
-    th { background: #f5f5f5; }
-    button { cursor: pointer; padding: 4px 8px; margin: 0 2px; }
-    a { color: #0070f3; }
-  </style>
-</head>
-<body>
-  <h1>Pages 대시보드</h1>
-  <p>총 ${pages.length}개 페이지 | <a href="/auth/logout">로그아웃</a></p>
-  <table>
-    <thead>
-      <tr><th>제목</th><th>공개 여부</th><th>생성일</th><th>관리</th></tr>
-    </thead>
-    <tbody>${rows || '<tr><td colspan="4" style="text-align:center">페이지가 없습니다</td></tr>'}</tbody>
-  </table>
-  <script>
-    async function toggleVisibility(id, isPrivate) {
-      const res = await fetch('/api/pages/' + id + '/visibility', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ private: isPrivate }),
-      });
-      if (res.ok) location.reload();
-      else alert('전환 실패: ' + res.status);
-    }
-    async function deletePage(id) {
-      if (!confirm('정말 삭제하시겠습니까?')) return;
-      const res = await fetch('/api/pages/' + id, { method: 'DELETE' });
-      if (res.ok) location.reload();
-      else alert('삭제 실패: ' + res.status);
-    }
-  </script>
-</body>
-</html>`);
+  res.send(renderDashboard({ pages, baseUrl: BASE_URL }));
 });
-
-// ── HTML 이스케이프 헬퍼 ─────────────────────────────────────────────────
-function escHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
 function readAnnotationToken(req) {
   const headerToken = req.get(ANNOTATION_TOKEN_HEADER);
