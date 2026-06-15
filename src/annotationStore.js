@@ -52,6 +52,21 @@ function createAnnotationStore({ dbPath }) {
         comments,
       };
     },
+    countByRevisionIds(revIds) {
+      const uniqueRevIds = [...new Set(revIds.filter((revId) => typeof revId === 'string' && revId))];
+      const counts = Object.fromEntries(uniqueRevIds.map((revId) => [revId, 0]));
+      if (uniqueRevIds.length === 0) return counts;
+
+      const placeholders = uniqueRevIds.map(() => '?').join(',');
+      const rows = db.prepare(`
+        SELECT rev_id, COUNT(*) AS count
+        FROM comments
+        WHERE rev_id IN (${placeholders})
+        GROUP BY rev_id
+      `).all(...uniqueRevIds);
+      for (const row of rows) counts[row.rev_id] = row.count;
+      return counts;
+    },
     replace(revId, rawPayload) {
       const payload = normalizeCommentsPayload(revId, rawPayload);
       replaceTransaction(revId, payload);

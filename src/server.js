@@ -11,7 +11,7 @@ const path = require('path');
 const { AnnotationStoreError, createAnnotationStore } = require('./annotationStore');
 const { BundleStoreError, createBundleStore } = require('./bundleStore');
 const { verifyAnnotationToken } = require('./capabilityTokens');
-const { renderDashboard } = require('./dashboard');
+const { renderDashboard, renderDocumentDetail } = require('./dashboard');
 const {
   backfillDocumentMetadata,
   createDocumentStore,
@@ -364,13 +364,42 @@ function streamBundleAsset(res, asset) {
 }
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────
-app.get('/', requireAuth, (req, res) => {
-  const pages = pageStorage.listMetas();
-  pages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+app.get('/', requireAuth, sendDashboard);
+app.get('/dashboard', requireAuth, sendDashboard);
+
+app.get('/dashboard/documents/:slug', requireAuth, (req, res) => {
+  const { slug } = req.params;
+  if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  const documentRecord = documents.getDocument(slug);
+  if (!documentRecord) return res.status(404).send('<h1>404 Not Found</h1>');
+
+  const revisionIds = documentRecord.revisions.map((revision) => revision.revId);
+  const commentCounts = annotations.countByRevisionIds(revisionIds);
+  const revisions = documentRecord.revisions.map((revision) => {
+    const meta = pageStorage.readMeta(revision.revId);
+    return {
+      ...revision,
+      reviewable: meta?.reviewable === true,
+      commentCount: commentCounts[revision.revId] || 0,
+      comments: annotations.list(revision.revId).comments,
+    };
+  });
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(renderDashboard({ pages, baseUrl: BASE_URL }));
+  res.send(renderDocumentDetail({ documentRecord, revisions, baseUrl: BASE_URL }));
 });
+
+function sendDashboard(req, res) {
+  const pages = pageStorage
+    .listMetas()
+    .filter((page) => !page.document?.slug);
+  pages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const documentRecords = documents.listDocuments();
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(renderDashboard({ pages, documents: documentRecords, baseUrl: BASE_URL }));
+}
 
 function readAnnotationToken(req) {
   const headerToken = req.get(ANNOTATION_TOKEN_HEADER);

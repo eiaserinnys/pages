@@ -11,6 +11,21 @@ const test = require('node:test');
 
 const API_TOKEN = 'test-api-token';
 
+test('dashboard requires google authentication', async () => {
+  const server = await startPagesServer();
+  try {
+    const root = await fetch(`${server.baseUrl}/`, { redirect: 'manual' });
+    assert.equal(root.status, 302);
+    assert.equal(root.headers.get('location'), '/auth/google');
+
+    const dashboard = await fetch(`${server.baseUrl}/dashboard`, { redirect: 'manual' });
+    assert.equal(dashboard.status, 302);
+    assert.equal(dashboard.headers.get('location'), '/auth/google');
+  } finally {
+    await stopPagesServer(server);
+  }
+});
+
 test('server supports anonymous pages and opt-in document revisions', async () => {
   const server = await startPagesServer();
   try {
