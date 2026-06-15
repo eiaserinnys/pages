@@ -7,6 +7,7 @@ A lightweight HTML page hosting service. Clients upload HTML via a Bearer-token-
 ## Features
 
 - **HTML upload** — POST any HTML string and get back a stable `/p/:id` URL
+- **Document revisions** — opt-in `/d/:slug` stable URLs keep a revision history without changing anonymous uploads
 - **Review annotations** — opt-in reviewable pages receive rev-scoped comment storage
 - **Public / private toggle** — pages default to public; flip visibility from the dashboard
 - **Google OAuth dashboard** — only allowlisted Google accounts can access `/` and manage pages
@@ -44,6 +45,7 @@ Content-Type: application/json
 {
   "html": "<html>...</html>",
   "title": "My Report",      // optional, defaults to "(제목 없음)"
+  "doc": "my-report",        // optional, opt-in stable document slug
   "private": false,          // optional, defaults to false
   "reviewable": false,       // optional, defaults to false
   "webhookUrl": "https://example.com/hook", // optional, requires reviewable=true
@@ -80,7 +82,68 @@ If `reviewable` is `true`, the response also includes a rev-scoped capability to
 }
 ```
 
+If `doc` is present, the page is appended as a new immutable revision under that document slug. The response keeps the existing `id` and `url` fields and adds document fields:
+
+```json
+{
+  "id": "b2c3d4e5f6a7",
+  "url": "https://pages.example.com/p/b2c3d4e5f6a7",
+  "docId": "doc_123abc456def",
+  "revId": "b2c3d4e5f6a7",
+  "revNumber": 2,
+  "stableUrl": "https://pages.example.com/d/my-report",
+  "revisionUrl": "https://pages.example.com/d/my-report/r/2"
+}
+```
+
+`doc` is opt-in. If it is omitted, the response shape is unchanged and the backend only records an internal anonymous one-revision document. Slugs must match `^[a-z0-9][a-z0-9_-]{2,63}$`; reserved route names such as `p`, `d`, `api`, and `auth` are rejected.
+
 `webhookUrl` and `webhookSecret` are accepted only for reviewable pages. Page metadata stores `review.webhookUrl` and, when signing is enabled, `review.webhookSecretHash`; the raw signing secret is kept in the SQLite metadata store, not in the page JSON metadata or injected HTML.
+
+### Document revisions
+
+```
+GET /d/:slug
+```
+
+Redirects to the latest published revision URL, `/d/:slug/r/:revNumber`.
+
+```
+GET /d/:slug/r/:revNumber
+```
+
+Serves that fixed revision's HTML. Revision URLs do not move when newer revisions are published.
+
+```
+GET /api/documents/:slug
+```
+
+Returns document metadata and revisions in newest-first order:
+
+```json
+{
+  "docId": "doc_123abc456def",
+  "slug": "my-report",
+  "title": "My Report",
+  "owner": "api",
+  "latestRevision": "b2c3d4e5f6a7",
+  "stableUrl": "https://pages.example.com/d/my-report",
+  "createdAt": "2026-06-15T00:00:00.000Z",
+  "updatedAt": "2026-06-15T01:00:00.000Z",
+  "revisions": [
+    {
+      "revId": "b2c3d4e5f6a7",
+      "revNumber": 2,
+      "status": "published",
+      "createdAt": "2026-06-15T01:00:00.000Z",
+      "pageUrl": "https://pages.example.com/p/b2c3d4e5f6a7",
+      "revisionUrl": "https://pages.example.com/d/my-report/r/2"
+    }
+  ]
+}
+```
+
+Review comments remain scoped to a single `revId`. Publishing a new revision starts with an empty comment set; unresolved comments are not carried over automatically.
 
 ### Annotation comments
 
@@ -130,6 +193,9 @@ Webhook delivery has a 5 second timeout, logs failures to stderr, and does not r
 | Method   | Path                             | Auth          | Description            |
 |----------|----------------------------------|---------------|------------------------|
 | `GET`    | `/p/:pageId`                     | none (public) | Serve the page         |
+| `GET`    | `/d/:slug`                       | none (public) | Redirect to latest revision |
+| `GET`    | `/d/:slug/r/:revNumber`          | none (public) | Serve a fixed revision |
+| `GET`    | `/api/documents/:slug`           | none          | Show document metadata |
 | `GET`    | `/api/annotations/:revId`        | none          | List review comments   |
 | `PUT`    | `/api/annotations/:revId`        | capability    | Replace review comments |
 | `PATCH`  | `/api/pages/:pageId/visibility`  | Google OAuth  | Toggle public/private  |
