@@ -183,6 +183,66 @@ test('server publishes and serves multifile bundles for anonymous, document, and
   }
 });
 
+test('server redirects bundle entry URLs to slash-backed directory bases', async () => {
+  const server = await startPagesServer();
+  try {
+    const anonymous = await postPage(server, {
+      title: 'Slash Bundle',
+      files: encodedFiles({
+        'index.html': '<!doctype html><html><head><link rel="stylesheet" href="assets/style.css"></head><body>Slash</body></html>',
+        'assets/style.css': 'body { color: purple; }',
+      }),
+    });
+
+    const pageEntry = await fetch(`${server.baseUrl}/p/${anonymous.id}`, { redirect: 'manual' });
+    assert.equal(pageEntry.status, 302);
+    assert.equal(pageEntry.headers.get('location'), `/p/${anonymous.id}/`);
+
+    const pageEntrySlash = await fetch(`${server.baseUrl}/p/${anonymous.id}/`);
+    assert.equal(pageEntrySlash.status, 200);
+    assert.match(await pageEntrySlash.text(), /Slash/);
+
+    const pageAsset = await fetch(`${server.baseUrl}/p/${anonymous.id}/assets/style.css`);
+    assert.equal(pageAsset.status, 200);
+    assert.match(pageAsset.headers.get('content-type'), /^text\/css/);
+
+    const browserMisresolvedPageAsset = await fetch(`${server.baseUrl}/p/assets/style.css`);
+    assert.equal(browserMisresolvedPageAsset.status, 404);
+
+    const reviewableDoc = await postPage(server, {
+      title: 'Reviewable Slash Bundle',
+      doc: 'reviewable-slash-doc',
+      reviewable: true,
+      files: encodedFiles({
+        'index.html': '<!doctype html><html><head><link rel="stylesheet" href="assets/style.css"></head><body>Review slash</body></html>',
+        'assets/style.css': '.review { color: blue; }',
+        'assets/review-comments.js': 'window.reviewLoaded = true;',
+      }),
+    });
+
+    const revisionEntry = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/r/1`, { redirect: 'manual' });
+    assert.equal(revisionEntry.status, 302);
+    assert.equal(revisionEntry.headers.get('location'), '/d/reviewable-slash-doc/r/1/');
+
+    const revisionEntrySlash = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/r/1/`);
+    assert.equal(revisionEntrySlash.status, 200);
+    assert.match(await revisionEntrySlash.text(), /window\.__PAGES_REVIEW__/);
+
+    const revisionAsset = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/r/1/assets/style.css`);
+    assert.equal(revisionAsset.status, 200);
+    assert.equal(await revisionAsset.text(), '.review { color: blue; }');
+
+    const browserMisresolvedRevisionAsset = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/r/assets/style.css`);
+    assert.equal(browserMisresolvedRevisionAsset.status, 404);
+
+    const annotations = await fetchJson(`${server.baseUrl}${reviewableDoc.review.annotationsUrl}`);
+    assert.equal(annotations.document_id, reviewableDoc.revId);
+    assert.deepEqual(annotations.comments, []);
+  } finally {
+    await stopPagesServer(server);
+  }
+});
+
 test('server rejects unsafe bundle paths', async () => {
   const server = await startPagesServer();
   try {
