@@ -5,6 +5,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "worker:check": "node --check src/worker.mjs",
+    "worker:dry-run": "npx --yes wrangler@4.86.0 deploy --dry-run",
+    "worker:migrate:d1": "npx --yes wrangler@4.86.0 d1 migrations apply pages --remote",
     "test": "node --test"
   },
   "dependencies": {

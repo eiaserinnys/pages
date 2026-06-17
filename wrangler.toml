@@ -1,0 +1,23 @@
+name = "pages-cloudflare"
+main = "src/worker.mjs"
+compatibility_date = "2026-06-17"
+workers_dev = true
+
+[vars]
+BASE_URL = "https://pages.eiaserinnys.me"
+ALLOWED_EMAILS = "eiaserinnys@gmail.com"
+
+[[d1_databases]]
+binding = "PAGES_DB"
+database_name = "pages"
+database_id = "af7049be-6ba5-4261-bc05-e5773d3eec33"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "PAGES_BUCKET"
+bucket_name = "pages-content"
+
+# Enable only after the current Express origin has been migrated.
+# [[routes]]
+# pattern = "pages.eiaserinnys.me"
+# custom_domain = true

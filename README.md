@@ -253,3 +253,33 @@ pm2 start ecosystem.config.js
 ```
 
 The `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system. Do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
+
+## Cloudflare Worker Backend
+
+The repository includes a staged Cloudflare Worker implementation in `src/worker.mjs`. It is not wired to `pages.eiaserinnys.me` by default.
+
+Cloudflare resources:
+
+- D1 database: `pages` (`af7049be-6ba5-4261-bc05-e5773d3eec33`)
+- Private R2 bucket: `pages-content`
+- Existing public R2 bucket for externally shareable assets: `pages-assets`
+
+The Worker keeps uploaded page HTML and bundle files in the private `pages-content` bucket so private pages are not exposed through a public R2 URL. D1 replaces the current `pages-meta.sqlite` metadata store for documents, revisions, annotations, webhook secrets, and revision asset manifests.
+
+Required Worker secrets:
+
+```bash
+npx --yes wrangler@4.86.0 secret put PAGES_API_TOKEN
+npx --yes wrangler@4.86.0 secret put SESSION_SECRET
+npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_ID
+npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
+```
+
+Non-secret Worker variables and bindings live in `wrangler.toml`. The custom-domain route is intentionally commented out until migration and smoke testing are complete.
+
+Suggested cutover sequence:
+
+1. Apply D1 migrations with `npm run worker:migrate:d1`.
+2. Copy the current Express data from `PAGES_DIR` into D1 and the `pages-content` R2 bucket.
+3. Deploy the Worker to the workers.dev staging URL and smoke test uploads, public pages, private-page OAuth, document revisions, bundle assets, review annotations, and webhooks.
+4. Uncomment the `pages.eiaserinnys.me` route in `wrangler.toml` and deploy during an approved cutover window.
