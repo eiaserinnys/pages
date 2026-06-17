@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import mimetypes
 import os
@@ -148,24 +149,96 @@ def put_file(s3: Any, bucket: str, source: Path, key: str, dry_run: bool) -> Non
     )
 
 
-def migrate_r2_files(s3: Any, bucket: str, source_dir: Path, conn: sqlite3.Connection, dry_run: bool) -> tuple[int, int]:
-    page_count = 0
-    for path in sorted(list(source_dir.glob("*.json")) + list(source_dir.glob("*.html"))):
-        put_file(s3, bucket, path, f"pages/{path.name}", dry_run)
-        page_count += 1
-        if page_count % 200 == 0:
-            print(f"  R2 page files: {page_count}")
+def put_file_with_wrangler(bucket: str, source: Path, key: str, dry_run: bool, wrangler_version: str) -> None:
+    if dry_run:
+        return
+    cmd = [
+        "npx",
+        "--yes",
+        f"wrangler@{wrangler_version}",
+        "r2",
+        "object",
+        "put",
+        f"{bucket}/{key}",
+        "--file",
+        str(source),
+        "--content-type",
+        content_type(source),
+        "--cache-control",
+        "private, max-age=60",
+        "--remote",
+        "--force",
+    ]
+    proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if proc.returncode != 0:
+        if proc.stdout:
+            print(proc.stdout)
+        raise SystemExit(proc.returncode)
 
-    bundle_count = 0
+
+def upload_wrangler_files(
+    jobs: list[tuple[Path, str]],
+    bucket: str,
+    dry_run: bool,
+    wrangler_version: str,
+    workers: int,
+    progress_label: str,
+    progress_interval: int,
+) -> int:
+    if dry_run:
+        return len(jobs)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(put_file_with_wrangler, bucket, source, key, False, wrangler_version)
+            for source, key in jobs
+        ]
+        for future in as_completed(futures):
+            future.result()
+            completed += 1
+            if completed % progress_interval == 0:
+                print(f"  R2 {progress_label}: {completed}/{len(jobs)}")
+    return completed
+
+
+def migrate_r2_files(
+    s3: Any,
+    bucket: str,
+    source_dir: Path,
+    conn: sqlite3.Connection,
+    dry_run: bool,
+    r2_method: str,
+    wrangler_version: str,
+    r2_workers: int,
+) -> tuple[int, int]:
+    page_jobs = [(path, f"pages/{path.name}") for path in sorted(list(source_dir.glob("*.json")) + list(source_dir.glob("*.html")))]
+    if r2_method == "wrangler":
+        page_count = upload_wrangler_files(page_jobs, bucket, dry_run, wrangler_version, r2_workers, "page files", 200)
+    else:
+        page_count = 0
+        for path, key in page_jobs:
+            put_file(s3, bucket, path, key, dry_run)
+            page_count += 1
+            if page_count % 200 == 0:
+                print(f"  R2 page files: {page_count}")
+
+    bundle_jobs: list[tuple[Path, str]] = []
     for row in row_dicts(conn, "revision_assets", ["bytes_key"]):
         old_key = row["bytes_key"]
         source = source_dir / "bundles" / old_key
         if not source.exists():
             raise FileNotFoundError(f"Missing bundle file: {source}")
-        put_file(s3, bucket, source, f"bundles/{old_key}", dry_run)
-        bundle_count += 1
-        if bundle_count % 100 == 0:
-            print(f"  R2 bundle files: {bundle_count}")
+        key = f"bundles/{old_key}"
+        bundle_jobs.append((source, key))
+    if r2_method == "wrangler":
+        bundle_count = upload_wrangler_files(bundle_jobs, bucket, dry_run, wrangler_version, r2_workers, "bundle files", 100)
+    else:
+        bundle_count = 0
+        for source, key in bundle_jobs:
+            put_file(s3, bucket, source, key, dry_run)
+            bundle_count += 1
+            if bundle_count % 100 == 0:
+                print(f"  R2 bundle files: {bundle_count}")
 
     print(f"R2 {'dry-run' if dry_run else 'migrated'}: page_files={page_count}, bundle_files={bundle_count}")
     return page_count, bundle_count
@@ -180,6 +253,9 @@ def main() -> None:
     parser.add_argument("--apply-schema", action="store_true")
     parser.add_argument("--skip-d1", action="store_true")
     parser.add_argument("--skip-r2", action="store_true")
+    parser.add_argument("--r2-method", choices=["wrangler", "s3"], default=os.getenv("PAGES_R2_METHOD", "wrangler"))
+    parser.add_argument("--wrangler-version", default=os.getenv("WRANGLER_VERSION", "4.86.0"))
+    parser.add_argument("--r2-workers", type=int, default=int(os.getenv("PAGES_R2_WORKERS", "8")))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -205,8 +281,17 @@ def main() -> None:
                 migrate_table(d1, conn, table, columns, args.dry_run)
 
         if not args.skip_r2:
-            s3 = create_r2_client()
-            migrate_r2_files(s3, args.bucket, source_dir, conn, args.dry_run)
+            s3 = None if args.r2_method == "wrangler" else create_r2_client()
+            migrate_r2_files(
+                s3,
+                args.bucket,
+                source_dir,
+                conn,
+                args.dry_run,
+                args.r2_method,
+                args.wrangler_version,
+                args.r2_workers,
+            )
     finally:
         conn.close()
 

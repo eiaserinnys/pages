@@ -291,5 +291,7 @@ npm run worker:migrate:data -- \
   --apply-schema
 ```
 
+The data migration script uploads `pages-content` objects through `wrangler r2 object put` by default, so it uses `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. Pass `--r2-method s3` only when a dedicated R2 S3 access key is available.
+
 4. Deploy the Worker to the workers.dev staging URL and smoke test uploads, public pages, private-page OAuth, document revisions, bundle assets, review annotations, and webhooks.
 5. Uncomment the `pages.eiaserinnys.me` route in `wrangler.toml` and deploy during an approved cutover window.
