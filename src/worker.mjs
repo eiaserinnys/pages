@@ -25,6 +25,7 @@ const RETURN_TO_COOKIE = "pages.return_to";
 const WEBHOOK_TIMEOUT_MS = 5000;
 const DEFAULT_OWNER = "api";
 const PUBLISHED_STATUS = "published";
+const DASHBOARD_ANONYMOUS_PAGE_LIMIT = 100;
 const WINDOWS_RESERVED_NAMES = new Set([
   "CON",
   "PRN",
@@ -1211,23 +1212,36 @@ async function writeMeta(env, id, meta) {
 }
 
 async function listMetas(env) {
-  const pages = [];
-  let cursor = undefined;
-  do {
-    const listed = await env.PAGES_BUCKET.list({ prefix: "pages/", cursor });
-    for (const object of listed.objects) {
-      if (!object.key.endsWith(".json")) continue;
-      const page = await env.PAGES_BUCKET.get(object.key);
-      if (!page) continue;
-      try {
-        pages.push(JSON.parse(await page.text()));
-      } catch {
-        // Ignore broken metadata.
-      }
-    }
-    cursor = listed.truncated ? listed.cursor : undefined;
-  } while (cursor);
-  return pages;
+  const { results } = await env.PAGES_DB.prepare(`
+    SELECT
+      d.latest_revision AS id,
+      d.title,
+      d.updated_at,
+      COALESCE(r.created_at, d.created_at) AS created_at
+    FROM documents d
+    LEFT JOIN revisions r ON r.rev_id = d.latest_revision
+    WHERE d.slug IS NULL
+      AND d.latest_revision IS NOT NULL
+    ORDER BY d.updated_at DESC
+    LIMIT ?
+  `).bind(DASHBOARD_ANONYMOUS_PAGE_LIMIT).all();
+
+  return Promise.all((results || []).map(async (row) => {
+    const fallback = {
+      id: row.id,
+      title: row.title,
+      createdAt: row.created_at || row.updated_at,
+      private: false,
+    };
+    const meta = await readMeta(env, row.id);
+    if (!meta) return fallback;
+    return {
+      ...fallback,
+      title: meta.title || fallback.title,
+      createdAt: meta.createdAt || fallback.createdAt,
+      private: meta.private === true,
+    };
+  }));
 }
 
 function pageMetaKey(id) {
