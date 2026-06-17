@@ -17,8 +17,7 @@ migrations_dir = "migrations"
 binding = "PAGES_BUCKET"
 bucket_name = "pages-content"
 
-# Enable only with a Cloudflare token that can access the eiaserinnys.me zone.
-# [[routes]]
-# pattern = "pages.eiaserinnys.me"
-# zone_name = "eiaserinnys.me"
-# custom_domain = true
+[[routes]]
+pattern = "pages.eiaserinnys.me"
+zone_name = "eiaserinnys.me"
+custom_domain = true
