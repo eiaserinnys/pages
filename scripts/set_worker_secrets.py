@@ -37,7 +37,9 @@ def read_secret_values(source_env: Path | None) -> dict[str, str]:
     values: dict[str, str] = {}
     missing: list[str] = []
     for key in SECRET_KEYS:
-        value = os.getenv(key) or source_values.get(key)
+        value = source_values.get(key) if source_env else None
+        if not value:
+            value = os.getenv(key)
         if not value:
             missing.append(key)
         else:
