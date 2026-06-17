@@ -8,6 +8,8 @@
     "worker:check": "node --check src/worker.mjs",
     "worker:dry-run": "npx --yes wrangler@4.86.0 deploy --dry-run",
     "worker:migrate:d1": "npx --yes wrangler@4.86.0 d1 migrations apply pages --remote",
+    "worker:migrate:data": "python3 scripts/migrate_to_cloudflare.py",
+    "worker:set-secrets": "python3 scripts/set_worker_secrets.py",
     "test": "node --test"
   },
   "dependencies": {

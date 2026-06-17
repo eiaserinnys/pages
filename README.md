@@ -277,9 +277,19 @@ npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
 
 Non-secret Worker variables and bindings live in `wrangler.toml`. The custom-domain route is intentionally commented out until migration and smoke testing are complete.
 
+The `main` branch is deployed to Cloudflare Worker by `.github/workflows/cloudflare-worker.yml` after tests and `worker:dry-run` pass. Push deployments intentionally stop when `migrations/**` changed; run the workflow manually with `apply_d1_migrations=true` for schema changes.
+
 Suggested cutover sequence:
 
-1. Apply D1 migrations with `npm run worker:migrate:d1`.
-2. Copy the current Express data from `PAGES_DIR` into D1 and the `pages-content` R2 bucket.
-3. Deploy the Worker to the workers.dev staging URL and smoke test uploads, public pages, private-page OAuth, document revisions, bundle assets, review annotations, and webhooks.
-4. Uncomment the `pages.eiaserinnys.me` route in `wrangler.toml` and deploy during an approved cutover window.
+1. Set Worker secrets with `npm run worker:set-secrets -- --source-env /home/eias/services/pages/shared/.env`.
+2. Apply D1 migrations with `npm run worker:migrate:d1`.
+3. Copy the current Express data from `PAGES_DIR` into D1 and the `pages-content` R2 bucket:
+
+```bash
+npm run worker:migrate:data -- \
+  --source-dir /home/eias/services/pages/shared/pages \
+  --apply-schema
+```
+
+4. Deploy the Worker to the workers.dev staging URL and smoke test uploads, public pages, private-page OAuth, document revisions, bundle assets, review annotations, and webhooks.
+5. Uncomment the `pages.eiaserinnys.me` route in `wrangler.toml` and deploy during an approved cutover window.
