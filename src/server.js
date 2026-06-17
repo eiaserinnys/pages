@@ -43,6 +43,8 @@ const BASE_URL = process.env.BASE_URL; // trailing slash 없음, 예: https://pa
 const ALLOWED_EMAILS = process.env.ALLOWED_EMAILS.split(',').map((e) => e.trim());
 const ANNOTATION_TOKEN_TTL_SECONDS = 14 * 24 * 60 * 60;
 const ANNOTATION_TOKEN_HEADER = 'X-Pages-Annotation-Token';
+const DASHBOARD_DEFAULT_PAGE_SIZE = 25;
+const DASHBOARD_MAX_PAGE_SIZE = 100;
 
 // ── PAGES_DIR 보장 ────────────────────────────────────────────────────────
 fs.mkdirSync(PAGES_DIR, { recursive: true });
@@ -383,6 +385,14 @@ function appendOriginalQuery(req, targetPath) {
 }
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────
+app.get('/api/dashboard/documents', requireAuth, (req, res) => {
+  res.json(paginateItems(documents.listDocuments(), dashboardPagination(req)));
+});
+
+app.get('/api/dashboard/pages', requireAuth, (req, res) => {
+  res.json(paginateItems(listAnonymousPages(), dashboardPagination(req)));
+});
+
 app.get('/', requireAuth, sendDashboard);
 app.get('/dashboard', requireAuth, sendDashboard);
 
@@ -410,14 +420,45 @@ app.get('/dashboard/documents/:slug', requireAuth, (req, res) => {
 });
 
 function sendDashboard(req, res) {
+  const pages = paginateItems(listAnonymousPages(), { page: 1, pageSize: DASHBOARD_DEFAULT_PAGE_SIZE });
+  const documentRecords = paginateItems(documents.listDocuments(), { page: 1, pageSize: DASHBOARD_DEFAULT_PAGE_SIZE });
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(renderDashboard({ pages, documents: documentRecords, baseUrl: BASE_URL }));
+}
+
+function listAnonymousPages() {
   const pages = pageStorage
     .listMetas()
     .filter((page) => !page.document?.slug);
   pages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const documentRecords = documents.listDocuments();
+  return pages;
+}
 
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(renderDashboard({ pages, documents: documentRecords, baseUrl: BASE_URL }));
+function dashboardPagination(req) {
+  const page = positiveInteger(req.query.page) || 1;
+  const requestedPageSize = positiveInteger(req.query.pageSize) || DASHBOARD_DEFAULT_PAGE_SIZE;
+  const pageSize = Math.min(requestedPageSize, DASHBOARD_MAX_PAGE_SIZE);
+  return { page, pageSize };
+}
+
+function paginateItems(items, { page, pageSize }) {
+  const total = items.length;
+  const totalPages = total ? Math.ceil(total / pageSize) : 0;
+  const normalizedPage = totalPages ? Math.min(Math.max(page, 1), totalPages) : 0;
+  const offset = normalizedPage ? (normalizedPage - 1) * pageSize : 0;
+  return {
+    items: totalPages ? items.slice(offset, offset + pageSize) : [],
+    page: normalizedPage,
+    pageSize,
+    total,
+    totalPages,
+  };
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 0;
 }
 
 function readAnnotationToken(req) {

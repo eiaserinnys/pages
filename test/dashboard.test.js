@@ -6,33 +6,50 @@ const { renderDashboard, renderDocumentDetail } = require('../src/dashboard');
 
 const BASE_URL = 'https://pages.example.test';
 
-test('dashboard renders document and anonymous page sections separately', () => {
+test('dashboard renders document and one-off page sections with virtualized pagination shells', () => {
   const html = renderDashboard({
     baseUrl: BASE_URL,
-    documents: [
-      {
-        slug: 'phase-four-doc',
-        title: 'Phase Four',
-        owner: 'writer',
-        latestRevision: 'bbb222bbb222',
-        latestRevNumber: 2,
-        latestRevCreatedAt: '2026-06-15T02:00:00.000Z',
-        revisionCount: 2,
-        updatedAt: '2026-06-15T02:00:00.000Z',
-      },
-    ],
-    pages: [
-      {
-        id: 'aaa111aaa111',
-        title: 'Anonymous Page',
-        createdAt: '2026-06-15T01:00:00.000Z',
-        private: false,
-      },
-    ],
+    documents: {
+      page: 2,
+      pageSize: 1,
+      total: 3,
+      items: [
+        {
+          slug: 'phase-four-doc',
+          title: 'Phase Four',
+          owner: 'writer',
+          latestRevision: 'bbb222bbb222',
+          latestRevNumber: 2,
+          latestRevCreatedAt: '2026-06-15T02:00:00.000Z',
+          revisionCount: 2,
+          updatedAt: '2026-06-15T02:00:00.000Z',
+        },
+      ],
+    },
+    pages: {
+      page: 1,
+      pageSize: 1,
+      total: 2,
+      items: [
+        {
+          id: 'aaa111aaa111',
+          title: 'Anonymous Page',
+          createdAt: '2026-06-15T01:00:00.000Z',
+          private: false,
+        },
+      ],
+    },
   });
 
-  assert.match(html, /Documents/);
-  assert.match(html, /익명 페이지/);
+  assert.match(html, /문서/);
+  assert.match(html, /단발 게시/);
+  assert.match(html, /data-section="documents"/);
+  assert.match(html, /data-section="pages"/);
+  assert.match(html, /data-endpoint="\/api\/dashboard\/documents"/);
+  assert.match(html, /data-endpoint="\/api\/dashboard\/pages"/);
+  assert.match(html, /class="virtual-list"/);
+  assert.match(html, /2 \/ 3/);
+  assert.match(html, /1 \/ 2/);
   assert.match(html, /phase-four-doc/);
   assert.match(html, /Phase Four/);
   assert.match(html, /r2 · 2026-06-15T02:00:00.000Z/);
