@@ -5,7 +5,7 @@ workers_dev = true
 
 [vars]
 BASE_URL = "https://pages.eiaserinnys.me"
-ALLOWED_EMAILS = "eiaserinnys@gmail.com"
+ALLOWED_EMAILS = "eiaserinnys@gmail.com,eias@line.games"
 
 [[d1_databases]]
 binding = "PAGES_DB"
