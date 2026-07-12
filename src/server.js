@@ -262,15 +262,16 @@ app.delete('/api/pages/:pageId', requireAuth, (req, res) => {
 });
 
 // ── 라우트: 페이지 서빙 ───────────────────────────────────────────────────
-app.get('/d/:slug', (req, res) => {
+app.get('/d/:slug', (req, res, next) => {
   const { slug } = req.params;
   if (!isValidDocumentSlug(slug)) return res.status(404).send('<h1>404 Not Found</h1>');
 
   const documentRecord = documents.getDocument(slug);
   if (!documentRecord?.revision) return res.status(404).send('<h1>404 Not Found</h1>');
+  if (!hasTrailingSlash(req)) return redirectToTrailingSlash(req, res);
 
-  const latestPath = `/d/${slug}/r/${documentRecord.revision.revNumber}`;
-  res.redirect(302, appendOriginalQuery(req, hasTrailingSlash(req) ? `${latestPath}/` : latestPath));
+  res.setHeader('Cache-Control', 'no-store');
+  return sendPageAsset(req, res, next, documentRecord.revision.revId);
 });
 
 app.get('/d/:slug/r/:revNumber', (req, res, next) => {
@@ -309,6 +310,7 @@ app.get('/d/:slug/*', (req, res, next) => {
   const documentRecord = documents.getDocument(slug);
   if (!documentRecord?.revision) return res.status(404).send('<h1>404 Not Found</h1>');
 
+  res.setHeader('Cache-Control', 'no-store');
   return sendPageAsset(req, res, next, documentRecord.revision.revId, req.params[0]);
 });
 
@@ -377,11 +379,6 @@ function redirectToTrailingSlash(req, res) {
   const pathname = queryIndex === -1 ? req.originalUrl : req.originalUrl.slice(0, queryIndex);
   const query = queryIndex === -1 ? '' : req.originalUrl.slice(queryIndex);
   return res.redirect(302, `${pathname}/${query}`);
-}
-
-function appendOriginalQuery(req, targetPath) {
-  const queryIndex = req.originalUrl.indexOf('?');
-  return queryIndex === -1 ? targetPath : `${targetPath}${req.originalUrl.slice(queryIndex)}`;
 }
 
 // ── 라우트: 대시보드 ─────────────────────────────────────────────────────

@@ -47,6 +47,12 @@ test('server supports anonymous pages and opt-in document revisions', async () =
     assert.equal(first.stableUrl, `${server.baseUrl}/d/phase-two-doc`);
     assert.equal(first.revisionUrl, `${server.baseUrl}/d/phase-two-doc/r/1`);
 
+    const stableUrl = `${server.baseUrl}/d/phase-two-doc/`;
+    const firstLatest = await fetch(stableUrl);
+    assert.equal(firstLatest.status, 200);
+    assert.equal(firstLatest.headers.get('cache-control'), 'no-store');
+    assert.match(await firstLatest.text(), /Doc V1/);
+
     const second = await postPage(server, {
       html: '<h1>Doc V2</h1>',
       title: 'Doc V2',
@@ -58,7 +64,13 @@ test('server supports anonymous pages and opt-in document revisions', async () =
 
     const latestRedirect = await fetch(`${server.baseUrl}/d/phase-two-doc`, { redirect: 'manual' });
     assert.equal(latestRedirect.status, 302);
-    assert.equal(latestRedirect.headers.get('location'), '/d/phase-two-doc/r/2');
+    assert.equal(latestRedirect.headers.get('location'), '/d/phase-two-doc/');
+
+    const latest = await fetch(stableUrl);
+    assert.equal(latest.status, 200);
+    assert.equal(latest.url, stableUrl);
+    assert.equal(latest.headers.get('cache-control'), 'no-store');
+    assert.match(await latest.text(), /Doc V2/);
 
     const fixedFirst = await fetchText(`${server.baseUrl}/d/phase-two-doc/r/1`);
     const fixedSecond = await fetchText(`${server.baseUrl}/d/phase-two-doc/r/2`);
@@ -219,6 +231,19 @@ test('server redirects bundle entry URLs to slash-backed directory bases', async
         'assets/review-comments.js': 'window.reviewLoaded = true;',
       }),
     });
+
+    const documentEntry = await fetch(`${server.baseUrl}/d/reviewable-slash-doc`, { redirect: 'manual' });
+    assert.equal(documentEntry.status, 302);
+    assert.equal(documentEntry.headers.get('location'), '/d/reviewable-slash-doc/');
+
+    const documentEntrySlash = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/`);
+    assert.equal(documentEntrySlash.status, 200);
+    assert.equal(documentEntrySlash.url, `${server.baseUrl}/d/reviewable-slash-doc/`);
+    assert.match(await documentEntrySlash.text(), /window\.__PAGES_REVIEW__/);
+
+    const documentAsset = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/assets/style.css`);
+    assert.equal(documentAsset.status, 200);
+    assert.equal(await documentAsset.text(), '.review { color: blue; }');
 
     const revisionEntry = await fetch(`${server.baseUrl}/d/reviewable-slash-doc/r/1`, { redirect: 'manual' });
     assert.equal(revisionEntry.status, 302);

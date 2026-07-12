@@ -372,8 +372,7 @@ async function maybeServeDocumentRoute(request, env) {
   const documentRecord = await getDocument(env, slug);
   if (!documentRecord?.revision) return notFound();
   if (latestAsset[2] === undefined) {
-    const target = `/d/${slug}/r/${documentRecord.revision.revNumber}${url.pathname.endsWith("/") ? "/" : ""}${url.search}`;
-    return redirect(target);
+    return redirect(`${url.origin}/d/${slug}/${url.search}`);
   }
   return sendPageAsset(request, env, documentRecord.revision.revId, latestAsset[2] || "");
 }

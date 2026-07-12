@@ -132,7 +132,9 @@ Bundle paths reject traversal and ambiguous platform paths: `..`, absolute paths
 GET /d/:slug
 ```
 
-Redirects to the latest published revision URL, `/d/:slug/r/:revNumber`.
+Serves the latest published revision while keeping the stable document URL. The
+slashless form redirects only to `/d/:slug/` so relative bundle assets resolve
+correctly; it does not expose or pin the current revision number in the browser URL.
 
 ```
 GET /d/:slug/r/:revNumber
@@ -228,7 +230,7 @@ Webhook delivery has a 5 second timeout, logs failures to stderr, and does not r
 |----------|----------------------------------|---------------|------------------------|
 | `GET`    | `/p/:pageId`                     | none (public) | Serve the page         |
 | `GET`    | `/p/:pageId/:path`               | none (public) | Serve page bundle asset |
-| `GET`    | `/d/:slug`                       | none (public) | Redirect to latest revision |
+| `GET`    | `/d/:slug`                       | none (public) | Serve latest revision at the stable URL |
 | `GET`    | `/d/:slug/:path`                 | none (public) | Serve latest revision bundle asset |
 | `GET`    | `/d/:slug/r/:revNumber`          | none (public) | Serve a fixed revision |
 | `GET`    | `/d/:slug/r/:revNumber/:path`    | none (public) | Serve fixed revision bundle asset |
