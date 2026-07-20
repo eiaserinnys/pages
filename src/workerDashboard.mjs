@@ -170,6 +170,50 @@ export async function getDashboardDocumentDetail(env, slug, baseUrl) {
   };
 }
 
+export async function setDashboardDocumentVisibility(env, slug, privateValue) {
+  const documentRow = await env.PAGES_DB.prepare(`
+    SELECT doc_id, slug
+    FROM documents
+    WHERE slug = ?
+  `).bind(slug).first();
+  if (!documentRow) return { status: 'not_found' };
+
+  const { results } = await env.PAGES_DB.prepare(`
+    SELECT rev_id
+    FROM revisions
+    WHERE doc_id = ?
+    ORDER BY rev_number DESC
+  `).bind(documentRow.doc_id).all();
+  const revisionIds = (results || []).map((row) => row.rev_id);
+  const invalidStoredIds = revisionIds.filter((id) => !PAGE_ID_RE.test(id || ''));
+  if (!revisionIds.length || invalidStoredIds.length) {
+    return { status: 'invalid_metadata', invalidRevisionIds: invalidStoredIds };
+  }
+
+  const currentMetas = await Promise.all(revisionIds.map(async (id) => ({ id, meta: await readMeta(env, id) })));
+  const invalidRevisionIds = currentMetas.filter((entry) => !entry.meta).map((entry) => entry.id);
+  if (invalidRevisionIds.length) return { status: 'invalid_metadata', invalidRevisionIds };
+
+  const updated = [];
+  try {
+    for (const entry of currentMetas) {
+      await writeMeta(env, entry.id, { ...entry.meta, private: privateValue });
+      updated.push(entry);
+    }
+  } catch (error) {
+    await Promise.allSettled(updated.map((entry) => writeMeta(env, entry.id, entry.meta)));
+    throw error;
+  }
+
+  return {
+    status: 'updated',
+    slug: documentRow.slug,
+    private: privateValue,
+    revisionCount: revisionIds.length,
+    updatedRevisionIds: revisionIds,
+  };
+}
+
 export async function getDashboardPageDetail(env, pageId, baseUrl) {
   if (!PAGE_ID_RE.test(pageId)) return null;
   const row = await env.PAGES_DB.prepare(`
@@ -251,6 +295,12 @@ async function readMeta(env, pageId) {
   } catch {
     return null;
   }
+}
+
+async function writeMeta(env, pageId, meta) {
+  await env.PAGES_BUCKET.put(`pages/${pageId}.json`, JSON.stringify(meta, null, 2), {
+    httpMetadata: { contentType: 'application/json; charset=utf-8' },
+  });
 }
 
 function normalizeQuery(input) {

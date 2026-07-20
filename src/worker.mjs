@@ -6,6 +6,7 @@ import {
   getDashboardPageDetail,
   listDashboardDocuments,
   listDashboardPages,
+  setDashboardDocumentVisibility,
 } from './workerDashboard.mjs';
 
 const {
@@ -122,6 +123,15 @@ async function routeRequest(request, env, ctx) {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
     return listDashboardPagesApi(request, env);
+  }
+
+  const dashboardDocumentVisibilityMatch = pathname.match(/^\/api\/dashboard\/documents\/([^/]+)\/visibility$/);
+  if (request.method === "PATCH" && dashboardDocumentVisibilityMatch) {
+    const auth = await requireAuth(request, env);
+    if (auth.response) return auth.response;
+    const slug = safeDecodeURIComponent(dashboardDocumentVisibilityMatch[1]);
+    if (!isValidDocumentSlug(slug)) return json({ error: "Not found" }, 404);
+    return updateDocumentVisibility(request, env, slug);
   }
 
   const dashboardDocumentApiMatch = pathname.match(/^\/api\/dashboard\/documents\/([^/]+)$/);
@@ -462,6 +472,26 @@ async function updateVisibility(request, env, pageId) {
   meta.private = body.private;
   await writeMeta(env, pageId, meta);
   return json({ id: pageId, private: meta.private });
+}
+
+async function updateDocumentVisibility(request, env, slug) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "request body must be JSON" }, 400);
+  }
+  if (typeof body.private !== "boolean") return json({ error: "private field must be boolean" }, 400);
+  const result = await setDashboardDocumentVisibility(env, slug, body.private);
+  if (result.status === "not_found") return json({ error: "Not found" }, 404);
+  if (result.status === "invalid_metadata") {
+    return json({
+      error: "Document visibility requires valid metadata for every revision",
+      invalidRevisionIds: result.invalidRevisionIds,
+    }, 409);
+  }
+  const { status: _status, ...payload } = result;
+  return json(payload);
 }
 
 async function deletePage(env, pageId) {
