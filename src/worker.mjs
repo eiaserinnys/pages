@@ -1,3 +1,18 @@
+import dashboardModule from './dashboard.js';
+import {
+  dashboardQuery as readDashboardQuery,
+  deleteDashboardPageData,
+  getDashboardDocumentDetail,
+  getDashboardPageDetail,
+  listDashboardDocuments,
+  listDashboardPages,
+} from './workerDashboard.mjs';
+
+const {
+  renderDashboard: renderModernDashboard,
+  renderDocumentDetail: renderModernDocumentDetail,
+} = dashboardModule;
+
 const PAGE_ID_RE = /^[0-9a-f]{12}$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
 const RESERVED_SLUGS = new Set([
@@ -107,6 +122,24 @@ async function routeRequest(request, env, ctx) {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
     return listDashboardPagesApi(request, env);
+  }
+
+  const dashboardDocumentApiMatch = pathname.match(/^\/api\/dashboard\/documents\/([^/]+)$/);
+  if (request.method === "GET" && dashboardDocumentApiMatch) {
+    const auth = await requireAuth(request, env);
+    if (auth.response) return auth.response;
+    const slug = safeDecodeURIComponent(dashboardDocumentApiMatch[1]);
+    if (!isValidDocumentSlug(slug)) return json({ error: "Not found" }, 404);
+    const detail = await getDashboardDocumentDetail(env, slug, env.BASE_URL);
+    return detail ? json(detail) : json({ error: "Not found" }, 404);
+  }
+
+  const dashboardPageApiMatch = pathname.match(/^\/api\/dashboard\/pages\/([0-9a-f]{12})$/);
+  if (request.method === "GET" && dashboardPageApiMatch) {
+    const auth = await requireAuth(request, env);
+    if (auth.response) return auth.response;
+    const detail = await getDashboardPageDetail(env, dashboardPageApiMatch[1], env.BASE_URL);
+    return detail ? json(detail) : json({ error: "Not found" }, 404);
   }
 
   const documentApiMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
@@ -434,8 +467,12 @@ async function updateVisibility(request, env, pageId) {
 async function deletePage(env, pageId) {
   const meta = await readMeta(env, pageId);
   if (!meta) return json({ error: "Not found" }, 404);
-  await env.PAGES_BUCKET.delete(pageMetaKey(pageId));
-  await env.PAGES_BUCKET.delete(pageHtmlKey(pageId));
+  const deleted = await deleteDashboardPageData(env, pageId);
+  await env.PAGES_BUCKET.delete([
+    pageMetaKey(pageId),
+    pageHtmlKey(pageId),
+    ...deleted.assetKeys,
+  ]);
   return new Response(null, { status: 204 });
 }
 
@@ -503,19 +540,20 @@ async function replaceAnnotations(request, env, ctx, revId) {
 }
 
 async function sendDashboard(env) {
+  const initialQuery = { cursor: 0, limit: 24, q: "" };
   const [pages, documents] = await Promise.all([
-    listAnonymousPagesPage(env, { page: 1, pageSize: DASHBOARD_DEFAULT_PAGE_SIZE }),
-    listDocumentsPage(env, { page: 1, pageSize: DASHBOARD_DEFAULT_PAGE_SIZE }),
+    listDashboardPages(env, initialQuery),
+    listDashboardDocuments(env, initialQuery),
   ]);
-  return html(renderDashboard({ pages, documents, baseUrl: env.BASE_URL }));
+  return html(renderModernDashboard({ pages, documents, baseUrl: env.BASE_URL }));
 }
 
 async function listDashboardDocumentsApi(request, env) {
-  return json(await listDocumentsPage(env, dashboardPagination(request)));
+  return json(await listDashboardDocuments(env, readDashboardQuery(request)));
 }
 
 async function listDashboardPagesApi(request, env) {
-  return json(await listAnonymousPagesPage(env, dashboardPagination(request)));
+  return json(await listDashboardPages(env, readDashboardQuery(request)));
 }
 
 async function sendDocumentDashboard(env, slug) {
@@ -535,7 +573,7 @@ async function sendDocumentDashboard(env, slug) {
       comments: comments.comments,
     });
   }
-  return html(renderDocumentDetail({ documentRecord, revisions, baseUrl: env.BASE_URL }));
+  return html(renderModernDocumentDetail({ documentRecord, revisions, baseUrl: env.BASE_URL }));
 }
 
 async function appendRevision(env, input) {
@@ -2108,6 +2146,14 @@ function safeReturnTo(value) {
 
 function isValidDocumentSlug(slug) {
   return typeof slug === "string" && SLUG_RE.test(slug) && !RESERVED_SLUGS.has(slug);
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 function normalizeSlug(slug) {

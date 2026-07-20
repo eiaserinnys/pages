@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "worker:check": "node --check src/worker.mjs",
+    "worker:check": "node --check src/worker.mjs && node --check src/workerDashboard.mjs && node --check src/dashboard.js && node --check src/dashboardClient.js && node --check src/dashboardData.js && node --check src/dashboardStyles.js",
     "worker:dry-run": "npx --yes wrangler@4.86.0 deploy --dry-run",
     "worker:migrate:d1": "npx --yes wrangler@4.86.0 d1 migrations apply pages --remote",
     "worker:migrate:data": "python3 scripts/migrate_to_cloudflare.py",
