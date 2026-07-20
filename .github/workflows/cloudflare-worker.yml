@@ -9,7 +9,12 @@ on:
       - "migrations/**"
       - "package.json"
       - "package-lock.json"
+      - "src/dashboard.js"
+      - "src/dashboardClient.js"
+      - "src/dashboardData.js"
+      - "src/dashboardStyles.js"
       - "src/worker.mjs"
+      - "src/workerDashboard.mjs"
       - "wrangler.toml"
   workflow_dispatch:
     inputs:
