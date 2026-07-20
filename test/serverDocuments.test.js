@@ -21,6 +21,14 @@ test('dashboard requires google authentication', async () => {
     const dashboard = await fetch(`${server.baseUrl}/dashboard`, { redirect: 'manual' });
     assert.equal(dashboard.status, 302);
     assert.equal(dashboard.headers.get('location'), '/auth/google');
+
+    const documentsApi = await fetch(`${server.baseUrl}/api/dashboard/documents`, { redirect: 'manual' });
+    assert.equal(documentsApi.status, 302);
+    assert.equal(documentsApi.headers.get('location'), '/auth/google');
+
+    const pageDetailApi = await fetch(`${server.baseUrl}/api/dashboard/pages/aaa111aaa111`, { redirect: 'manual' });
+    assert.equal(pageDetailApi.status, 302);
+    assert.equal(pageDetailApi.headers.get('location'), '/auth/google');
   } finally {
     await stopPagesServer(server);
   }

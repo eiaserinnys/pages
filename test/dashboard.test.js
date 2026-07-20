@@ -6,13 +6,16 @@ const { renderDashboard, renderDocumentDetail } = require('../src/dashboard');
 
 const BASE_URL = 'https://pages.example.test';
 
-test('dashboard renders document and one-off page sections with virtualized pagination shells', () => {
+test('dashboard renders sticky tabbed explorer with infinite list and detail panel', () => {
   const html = renderDashboard({
     baseUrl: BASE_URL,
     documents: {
-      page: 2,
-      pageSize: 1,
+      cursor: 0,
+      limit: 24,
       total: 3,
+      nextCursor: 1,
+      hasMore: true,
+      query: '',
       items: [
         {
           slug: 'phase-four-doc',
@@ -27,9 +30,12 @@ test('dashboard renders document and one-off page sections with virtualized pagi
       ],
     },
     pages: {
-      page: 1,
-      pageSize: 1,
+      cursor: 0,
+      limit: 24,
       total: 2,
+      nextCursor: 1,
+      hasMore: true,
+      query: '',
       items: [
         {
           id: 'aaa111aaa111',
@@ -43,20 +49,27 @@ test('dashboard renders document and one-off page sections with virtualized pagi
 
   assert.match(html, /문서/);
   assert.match(html, /단발 게시/);
-  assert.match(html, /data-section="documents"/);
-  assert.match(html, /data-section="pages"/);
-  assert.match(html, /data-endpoint="\/api\/dashboard\/documents"/);
-  assert.match(html, /data-endpoint="\/api\/dashboard\/pages"/);
-  assert.match(html, /class="virtual-list"/);
-  assert.match(html, /2 \/ 3/);
-  assert.match(html, /1 \/ 2/);
+  assert.match(html, /class="dashboard-controls"/);
+  assert.match(html, /position: sticky/);
+  assert.match(html, /type="search"/);
+  assert.match(html, /role="tablist"/);
+  assert.match(html, /data-tab="documents"/);
+  assert.match(html, /data-tab="pages"/);
+  assert.match(html, /data-item-list/);
+  assert.match(html, /data-load-sentinel/);
+  assert.match(html, /data-detail-panel/);
+  assert.match(html, /data-detail-content/);
+  assert.match(html, /cursor=/);
+  assert.match(html, /nextCursor/);
+  assert.doesNotMatch(html, /class="pagination"/);
   assert.match(html, /phase-four-doc/);
   assert.match(html, /Phase Four/);
   assert.match(html, /r2 · 2026-06-15T02:00:00.000Z/);
   assert.match(html, /writer/);
   assert.match(html, /Anonymous Page/);
   assert.match(html, new RegExp(`${BASE_URL}/p/aaa111aaa111`));
-  assert.match(html, /\/dashboard\/documents\/phase-four-doc/);
+  assert.match(html, /data-kind="documents"/);
+  assert.match(html, /data-item-id="phase-four-doc"/);
 });
 
 test('document detail renders revisions, fixed HTML links, and rev-scoped comments', () => {

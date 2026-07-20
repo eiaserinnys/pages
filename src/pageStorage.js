@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const DEFAULT_HTML_SNIPPET_BYTES = 256 * 1024;
+
 function createPageStorage({ pagesDir }) {
   if (!pagesDir) {
     throw new Error('pagesDir is required');
@@ -11,6 +13,7 @@ function createPageStorage({ pagesDir }) {
 
   const htmlPath = (id) => path.join(pagesDir, `${id}.html`);
   const metaPath = (id) => path.join(pagesDir, `${id}.json`);
+  let metaListCache = null;
 
   return {
     htmlPath,
@@ -24,12 +27,27 @@ function createPageStorage({ pagesDir }) {
     },
     writeMeta(id, data) {
       fs.writeFileSync(metaPath(id), JSON.stringify(data, null, 2), 'utf8');
+      metaListCache = null;
     },
     writeHtml(id, html) {
       fs.writeFileSync(htmlPath(id), html, 'utf8');
     },
     readHtml(id) {
       return fs.readFileSync(htmlPath(id), 'utf8');
+    },
+    readHtmlSnippet(id, maxBytes = DEFAULT_HTML_SNIPPET_BYTES) {
+      const byteLimit = Number.isInteger(maxBytes) && maxBytes > 0
+        ? maxBytes
+        : DEFAULT_HTML_SNIPPET_BYTES;
+      const file = fs.openSync(htmlPath(id), 'r');
+      try {
+        const length = Math.min(fs.fstatSync(file).size, byteLimit);
+        const buffer = Buffer.alloc(length);
+        const bytesRead = fs.readSync(file, buffer, 0, length, 0);
+        return buffer.subarray(0, bytesRead).toString('utf8');
+      } finally {
+        fs.closeSync(file);
+      }
     },
     deletePage(id) {
       try {
@@ -38,8 +56,10 @@ function createPageStorage({ pagesDir }) {
       try {
         fs.unlinkSync(metaPath(id));
       } catch { /* already absent */ }
+      metaListCache = null;
     },
     listMetas() {
+      if (metaListCache) return metaListCache;
       const pages = [];
       let files = [];
       try {
@@ -52,7 +72,8 @@ function createPageStorage({ pagesDir }) {
           pages.push(JSON.parse(fs.readFileSync(path.join(pagesDir, file), 'utf8')));
         } catch { /* ignore broken metadata */ }
       }
-      return pages;
+      metaListCache = pages;
+      return metaListCache;
     },
   };
 }
