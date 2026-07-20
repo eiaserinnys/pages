@@ -42,6 +42,7 @@ const DASHBOARD_CLIENT_SCRIPT = `
 
     updateChrome();
     renderActiveList();
+    prefetchNext(activeCollection());
     requestAnimationFrame(maybeLoadMore);
 
     function normalizeCollection(value, endpoint) {
@@ -56,7 +57,11 @@ const DASHBOARD_CLIENT_SCRIPT = `
         hasMore: collection.hasMore === true,
         query: typeof collection.query === 'string' ? collection.query : '',
         loading: false,
+        appending: false,
         requestToken: 0,
+        prefetchCursor: null,
+        prefetchPage: null,
+        prefetchPromise: null,
       };
     }
 
@@ -66,19 +71,17 @@ const DASHBOARD_CLIENT_SCRIPT = `
       closeDetail();
       updateChrome();
       const collection = activeCollection();
-      if (collection.query !== state.query) resetActiveList();
-      else {
-        elements.viewport.scrollTop = 0;
-        renderActiveList();
-        requestAnimationFrame(maybeLoadMore);
-      }
+      elements.viewport.scrollTop = 0;
+      renderActiveList();
+      prefetchNext(collection);
+      requestAnimationFrame(maybeLoadMore);
     }
 
     function handleSearchInput() {
       state.query = elements.search.value.trim();
       elements.clear.hidden = !elements.search.value;
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(resetActiveList, 250);
+      searchTimer = setTimeout(resetCollectionsForSearch, 250);
     }
 
     function clearSearch() {
@@ -87,57 +90,114 @@ const DASHBOARD_CLIENT_SCRIPT = `
       state.query = '';
       elements.clear.hidden = true;
       elements.search.focus();
-      resetActiveList();
+      resetCollectionsForSearch();
     }
 
-    async function resetActiveList() {
-      const collection = activeCollection();
+    async function resetCollectionsForSearch() {
+      closeDetail();
+      elements.viewport.scrollTop = 0;
+      await Promise.allSettled(Object.keys(state.collections).map(function (kind) {
+        return resetCollection(kind, state.query);
+      }));
+    }
+
+    async function resetCollection(kind, query) {
+      const collection = state.collections[kind];
       const token = ++collection.requestToken;
+      clearPrefetch(collection);
       collection.loading = true;
-      updateLoadState();
+      collection.items = [];
+      collection.total = 0;
+      collection.cursor = 0;
+      collection.nextCursor = null;
+      collection.hasMore = false;
+      collection.query = query;
+      if (kind === state.activeKind) renderActiveList();
+      else updateChrome();
       try {
-        const page = await fetchCollection(collection, 0, state.query);
+        const page = await fetchCollection(collection, 0, query);
         if (token !== collection.requestToken) return;
         assignPage(collection, page, false);
-        elements.viewport.scrollTop = 0;
-        closeDetail();
-        renderActiveList();
-        requestAnimationFrame(maybeLoadMore);
+        if (kind === state.activeKind) {
+          renderActiveList();
+          prefetchNext(collection);
+          requestAnimationFrame(maybeLoadMore);
+        } else updateChrome();
       } catch (error) {
-        if (token === collection.requestToken) showListError(error);
+        if (token === collection.requestToken && kind === state.activeKind) showListError(error);
       } finally {
         if (token === collection.requestToken) {
           collection.loading = false;
-          updateLoadState();
+          if (kind === state.activeKind) updateLoadState();
         }
       }
     }
 
     async function loadMore() {
       const collection = activeCollection();
-      if (collection.loading || !collection.hasMore || collection.nextCursor == null) return;
-      const token = ++collection.requestToken;
-      collection.loading = true;
-      updateLoadState();
+      if (collection.loading || collection.appending || !collection.hasMore || collection.nextCursor == null) return;
+      const token = collection.requestToken;
+      const cursor = collection.nextCursor;
+      const query = collection.query;
+      collection.appending = true;
       try {
-        const page = await fetchCollection(collection, collection.nextCursor, state.query);
-        if (token !== collection.requestToken) return;
+        let page = collection.prefetchCursor === cursor ? collection.prefetchPage : null;
+        if (!page && collection.prefetchCursor === cursor && collection.prefetchPromise) {
+          page = await collection.prefetchPromise;
+        }
+        if (!page) page = await fetchCollection(collection, cursor, query);
+        if (token !== collection.requestToken || cursor !== collection.nextCursor || query !== collection.query) return;
+        collection.prefetchCursor = null;
+        collection.prefetchPage = null;
         assignPage(collection, page, true);
-        renderActiveList();
-        requestAnimationFrame(maybeLoadMore);
+        if (collection === activeCollection()) {
+          renderActiveList();
+          requestAnimationFrame(maybeLoadMore);
+        }
       } catch (error) {
         if (token === collection.requestToken) showListError(error);
       } finally {
         if (token === collection.requestToken) {
-          collection.loading = false;
-          updateLoadState();
+          collection.appending = false;
+          if (collection === activeCollection()) {
+            updateLoadState();
+            prefetchNext(collection);
+          }
         }
       }
     }
 
     function maybeLoadMore() {
       const remaining = elements.viewport.scrollHeight - elements.viewport.scrollTop - elements.viewport.clientHeight;
-      if (remaining < 320) loadMore();
+      if (remaining < Math.max(320, elements.viewport.clientHeight * 1.5)) loadMore();
+    }
+
+    function prefetchNext(collection) {
+      const cursor = collection.nextCursor;
+      if (collection.loading || collection.appending || !collection.hasMore || cursor == null) return null;
+      if (collection.prefetchCursor === cursor) return collection.prefetchPromise;
+      const token = collection.requestToken;
+      const query = collection.query;
+      collection.prefetchCursor = cursor;
+      const promise = fetchCollection(collection, cursor, query).then(function (page) {
+        if (token !== collection.requestToken || cursor !== collection.nextCursor || query !== collection.query) return null;
+        collection.prefetchPage = page;
+        return page;
+      }).catch(function () {
+        return null;
+      }).finally(function () {
+        if (collection.prefetchPromise === promise) collection.prefetchPromise = null;
+        if (!collection.prefetchPage && collection.prefetchCursor === cursor) collection.prefetchCursor = null;
+      });
+      collection.prefetchPromise = promise;
+      return promise;
+    }
+
+    function clearPrefetch(collection) {
+      collection.appending = false;
+      collection.prefetchCursor = null;
+      collection.prefetchPage = null;
+      collection.prefetchPromise = null;
     }
 
     async function fetchCollection(collection, cursor, query) {
@@ -187,6 +247,7 @@ const DASHBOARD_CLIENT_SCRIPT = `
         '<div class="item-actions">' +
           '<span class="status-pill' + statusClass + '">' + (item.private ? '비공개' : '공개') + '</span>' +
           '<span class="status-pill">' + escapeHtml(String(item.revisionCount || 0) + ' revisions') + '</span>' +
+          '<button class="button secondary compact" type="button" data-kind="documents" data-item-id="' + escapeAttr(id) + '" data-action="toggle-visibility" data-private="' + (item.private ? 'false' : 'true') + '">' + (item.private ? '공개 전환' : '비공개 전환') + '</button>' +
           '<a class="button secondary compact" href="' + escapeAttr(seed.baseUrl + '/d/' + encodeURIComponent(id) + '/') + '" target="_blank" rel="noreferrer">열기</a>' +
         '</div>' +
       '</article>';
@@ -203,15 +264,15 @@ const DASHBOARD_CLIENT_SCRIPT = `
         '</button>' +
         '<div class="item-actions">' +
           '<span class="status-pill' + statusClass + '">' + (item.private ? '비공개' : '공개') + '</span>' +
-          '<button class="button secondary compact" type="button" data-action="toggle-visibility" data-page-id="' + escapeAttr(id) + '" data-private="' + (item.private ? 'false' : 'true') + '">' + (item.private ? '공개 전환' : '비공개 전환') + '</button>' +
-          '<button class="button danger compact" type="button" data-action="delete-page" data-page-id="' + escapeAttr(id) + '">삭제</button>' +
+          '<button class="button secondary compact" type="button" data-kind="pages" data-item-id="' + escapeAttr(id) + '" data-action="toggle-visibility" data-private="' + (item.private ? 'false' : 'true') + '">' + (item.private ? '공개 전환' : '비공개 전환') + '</button>' +
+          '<button class="button danger compact" type="button" data-kind="pages" data-item-id="' + escapeAttr(id) + '" data-action="delete-page">삭제</button>' +
         '</div>' +
       '</article>';
     }
 
     function handleListClick(event) {
       const action = event.target.closest('[data-action]');
-      if (action) return handlePageAction(action);
+      if (action) return handleItemAction(action);
       const selector = event.target.closest('[data-select-item]');
       if (selector) showDetail(selector.dataset.kind, selector.dataset.itemId);
     }
@@ -220,40 +281,46 @@ const DASHBOARD_CLIENT_SCRIPT = `
       const close = event.target.closest('[data-close-detail]');
       if (close) return closeDetail();
       const action = event.target.closest('[data-action]');
-      if (action) handlePageAction(action);
+      if (action) handleItemAction(action);
     }
 
-    async function handlePageAction(button) {
-      const id = button.dataset.pageId;
-      if (!id) return;
+    async function handleItemAction(button) {
+      const kind = button.dataset.kind;
+      const id = button.dataset.itemId;
+      if (!state.collections[kind] || !id) return;
       if (button.dataset.action === 'toggle-visibility') {
         button.disabled = true;
         try {
-          const response = await fetch('/api/pages/' + encodeURIComponent(id) + '/visibility', {
+          const endpoint = kind === 'documents'
+            ? '/api/dashboard/documents/' + encodeURIComponent(id) + '/visibility'
+            : '/api/pages/' + encodeURIComponent(id) + '/visibility';
+          const response = await fetch(endpoint, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ private: button.dataset.private === 'true' }),
           });
           if (!response.ok) throw new Error('공개 상태를 바꾸지 못했습니다 (' + response.status + ')');
           const payload = await response.json();
-          const item = state.collections.pages.items.find(function (candidate) { return candidate.id === id; });
+          const item = state.collections[kind].items.find(function (candidate) {
+            return collectionItemId(kind, candidate) === id;
+          });
           if (item) item.private = payload.private === true;
           renderActiveList();
-          if (isSelected('pages', id)) showDetail('pages', id);
+          if (isSelected(kind, id)) showDetail(kind, id);
         } catch (error) {
           alert(error.message);
         } finally {
           button.disabled = false;
         }
       }
-      if (button.dataset.action === 'delete-page') {
+      if (button.dataset.action === 'delete-page' && kind === 'pages') {
         if (!confirm('정말 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.')) return;
         button.disabled = true;
         try {
           const response = await fetch('/api/pages/' + encodeURIComponent(id), { method: 'DELETE' });
           if (!response.ok) throw new Error('삭제하지 못했습니다 (' + response.status + ')');
           if (isSelected('pages', id)) closeDetail();
-          await resetActiveList();
+          await resetCollection('pages', state.query);
         } catch (error) {
           alert(error.message);
           button.disabled = false;
@@ -297,9 +364,9 @@ const DASHBOARD_CLIENT_SCRIPT = `
       const id = isPage ? detail.id : detail.slug;
       const kicker = isPage ? '단발 게시' : '문서';
       const statusClass = detail.private ? ' private' : '';
-      const pageActions = isPage ?
-        '<button class="button secondary" type="button" data-action="toggle-visibility" data-page-id="' + escapeAttr(id) + '" data-private="' + (detail.private ? 'false' : 'true') + '">' + (detail.private ? '공개로 전환' : '비공개로 전환') + '</button>' +
-        '<button class="button danger" type="button" data-action="delete-page" data-page-id="' + escapeAttr(id) + '">삭제</button>' : '';
+      const kind = isPage ? 'pages' : 'documents';
+      const visibilityAction = '<button class="button secondary" type="button" data-kind="' + kind + '" data-item-id="' + escapeAttr(id) + '" data-action="toggle-visibility" data-private="' + (detail.private ? 'false' : 'true') + '">' + (detail.private ? '공개로 전환' : '비공개로 전환') + '</button>';
+      const deleteAction = isPage ? '<button class="button danger" type="button" data-kind="pages" data-item-id="' + escapeAttr(id) + '" data-action="delete-page">삭제</button>' : '';
       const revisions = Array.isArray(detail.revisions) && detail.revisions.length ?
         '<h3 class="revision-heading">리비전 이력</h3><div class="revision-list">' + detail.revisions.map(renderRevision).join('') + '</div>' : '';
       return '<div class="detail-content">' +
@@ -309,7 +376,7 @@ const DASHBOARD_CLIENT_SCRIPT = `
         '</div><button class="icon-button" type="button" data-close-detail aria-label="상세 패널 닫기">×</button></header>' +
         '<div class="detail-actions">' +
           '<span class="status-pill' + statusClass + '">' + (detail.private ? '비공개' : '공개') + '</span>' +
-          '<a class="button" href="' + escapeAttr(safeHttpUrl(detail.url)) + '" target="_blank" rel="noreferrer">페이지 열기</a>' + pageActions +
+          '<a class="button" href="' + escapeAttr(safeHttpUrl(detail.url)) + '" target="_blank" rel="noreferrer">페이지 열기</a>' + visibilityAction + deleteAction +
         '</div>' +
         renderUnfurl(detail.unfurl || { title: detail.title, url: detail.url }) +
         '<dl class="detail-meta">' +
@@ -362,6 +429,7 @@ const DASHBOARD_CLIENT_SCRIPT = `
     }
 
     function activeCollection() { return state.collections[state.activeKind]; }
+    function collectionItemId(kind, item) { return String(kind === 'documents' ? item.slug || '' : item.id || ''); }
     function isSelected(kind, id) { return state.selected && state.selected.kind === kind && state.selected.id === id; }
 
     async function fetchJson(url) {

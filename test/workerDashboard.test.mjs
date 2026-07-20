@@ -10,6 +10,7 @@ import {
   getDashboardPageDetail,
   listDashboardDocuments,
   listDashboardPages,
+  setDashboardDocumentVisibility,
 } from '../src/workerDashboard.mjs';
 
 test('Worker dashboard query normalizes cursor, limit, and search', () => {
@@ -102,6 +103,12 @@ test('Worker dashboard uses D1 cursor search and R2 range unfurl without migrati
   assert.deepEqual(damagedPages.items, []);
   assert.equal(damagedDocuments.nextCursor, null);
   assert.equal(damagedPages.nextCursor, null);
+  const putCount = bucket.puts.length;
+  assert.deepEqual(await setDashboardDocumentVisibility(env, 'damaged-doc', true), {
+    status: 'invalid_metadata',
+    invalidRevisionIds: ['999999999999'],
+  });
+  assert.equal(bucket.puts.length, putCount);
   database.close();
 });
 
@@ -128,6 +135,17 @@ test('Worker routes protect and render the modern dashboard and detail APIs', as
   assert.equal(unauthenticated.status, 302);
   assert.equal(unauthenticated.headers.get('location'), '/auth/google?returnTo=%2Fapi%2Fdashboard%2Fdocuments%2Falpha-doc');
 
+  const unauthenticatedVisibility = await worker.fetch(
+    new Request('https://pages.example.test/api/dashboard/documents/alpha-doc/visibility', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ private: true }),
+    }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(unauthenticatedVisibility.status, 302);
+
   const cookie = `pages.session=${signSession({ email: 'tester@example.com', exp: Math.floor(Date.now() / 1000) + 60 }, env.SESSION_SECRET)}`;
   const dashboard = await worker.fetch(
     new Request('https://pages.example.test/dashboard', { headers: { Cookie: cookie } }),
@@ -139,6 +157,56 @@ test('Worker routes protect and render the modern dashboard and detail APIs', as
   assert.match(dashboardHtml, /data-detail-panel/);
   assert.match(dashboardHtml, /data-tab="documents"/);
   assert.doesNotMatch(dashboardHtml, /data-page-action/);
+
+  const privateDocument = await worker.fetch(
+    new Request('https://pages.example.test/api/dashboard/documents/alpha-doc/visibility', {
+      method: 'PATCH',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ private: true }),
+    }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(privateDocument.status, 200);
+  assert.deepEqual(await privateDocument.json(), {
+    slug: 'alpha-doc',
+    private: true,
+    revisionCount: 2,
+    updatedRevisionIds: ['aaa111aaa111', 'eee555eee555'],
+  });
+
+  const privateDetail = await worker.fetch(
+    new Request('https://pages.example.test/api/dashboard/documents/alpha-doc', { headers: { Cookie: cookie } }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.deepEqual((await privateDetail.json()).revisions.map((revision) => revision.private), [true, true]);
+
+  const gatedOldRevision = await worker.fetch(
+    new Request('https://pages.example.test/d/alpha-doc/r/1/'),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(gatedOldRevision.status, 302);
+
+  const publicDocument = await worker.fetch(
+    new Request('https://pages.example.test/api/dashboard/documents/alpha-doc/visibility', {
+      method: 'PATCH',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ private: false }),
+    }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(publicDocument.status, 200);
+
+  const publicOldRevision = await worker.fetch(
+    new Request('https://pages.example.test/d/alpha-doc/r/1/'),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(publicOldRevision.status, 200);
+  assert.match(await publicOldRevision.text(), /Alpha v1/);
 
   const detail = await worker.fetch(
     new Request('https://pages.example.test/api/dashboard/pages/ccc333ccc333', { headers: { Cookie: cookie } }),
@@ -194,10 +262,13 @@ function createDatabase() {
       rev_id TEXT PRIMARY KEY, secret TEXT NOT NULL
     );
     CREATE TABLE revision_bundles (
-      rev_id TEXT PRIMARY KEY, entrypoint TEXT NOT NULL
+      rev_id TEXT PRIMARY KEY, entrypoint TEXT NOT NULL, file_count INTEGER NOT NULL DEFAULT 0,
+      total_size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE revision_assets (
       rev_id TEXT NOT NULL, path TEXT NOT NULL, bytes_key TEXT NOT NULL,
+      content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+      size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (rev_id, path)
     );
   `);
@@ -223,8 +294,8 @@ function seedDatabase(database) {
   database.prepare('INSERT INTO comments VALUES (?, ?, ?)').run('comment-2', 'aaa111aaa111', 'Two');
   database.prepare('INSERT INTO comments VALUES (?, ?, ?)').run('comment-page', 'ccc333ccc333', 'Page note');
   database.prepare('INSERT INTO webhook_secrets VALUES (?, ?)').run('ccc333ccc333', 'secret');
-  database.prepare('INSERT INTO revision_bundles VALUES (?, ?)').run('ccc333ccc333', 'index.html');
-  database.prepare('INSERT INTO revision_assets VALUES (?, ?, ?)').run(
+  database.prepare('INSERT INTO revision_bundles (rev_id, entrypoint) VALUES (?, ?)').run('ccc333ccc333', 'index.html');
+  database.prepare('INSERT INTO revision_assets (rev_id, path, bytes_key) VALUES (?, ?, ?)').run(
     'ccc333ccc333',
     'chart.svg',
     'assets/ccc333ccc333/chart.svg',
@@ -239,6 +310,7 @@ function seedBucket(bucket) {
   bucket.putJson('pages/ccc333ccc333.json', { id: 'ccc333ccc333', title: 'One-off Alpha', createdAt: '2026-07-20T06:00:00Z', private: false });
   bucket.putJson('pages/ddd444ddd444.json', { id: 'ddd444ddd444', title: 'Other Page', private: true });
   bucket.putText('pages/aaa111aaa111.html', '<html><head><meta property="og:title" content="Alpha OG"><meta property="og:image" content="card.png"></head></html>' + 'x'.repeat(DASHBOARD_HTML_PREVIEW_BYTES));
+  bucket.putText('pages/eee555eee555.html', '<html><head><title>Alpha v1</title></head><body>Alpha v1</body></html>');
   bucket.putText('pages/ccc333ccc333.html', '<html><head><title>One-off Alpha</title></head></html>');
   bucket.putText('assets/ccc333ccc333/chart.svg', '<svg></svg>');
 }
@@ -268,8 +340,18 @@ function createBucket() {
   return {
     reads: [],
     deletes: [],
+    puts: [],
     putJson(key, value) { values.set(key, new TextEncoder().encode(JSON.stringify(value))); },
     putText(key, value) { values.set(key, new TextEncoder().encode(value)); },
+    async put(key, value, options) {
+      const bytes = typeof value === 'string'
+        ? new TextEncoder().encode(value)
+        : value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      this.puts.push({ key, options });
+      values.set(key, bytes);
+    },
     async get(key, options) {
       this.reads.push({ key, options });
       const stored = values.get(key);
@@ -277,6 +359,9 @@ function createBucket() {
       const range = options?.range;
       const bytes = range ? stored.slice(range.offset, range.offset + range.length) : stored;
       return {
+        body: bytes,
+        size: bytes.byteLength,
+        httpMetadata: { contentType: key.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8' },
         async text() { return new TextDecoder().decode(bytes); },
         async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
       };
