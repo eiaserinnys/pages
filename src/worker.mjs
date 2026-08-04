@@ -90,15 +90,27 @@ const CONTENT_TYPES = new Map([
 
 export default {
   async fetch(request, env, ctx) {
+    const headOnly = request.method === "HEAD";
     try {
       assertRequiredEnv(env);
-      return await routeRequest(request, env, ctx);
+      const routedRequest = headOnly ? new Request(request, { method: "GET" }) : request;
+      const response = await routeRequest(routedRequest, env, ctx);
+      return headOnly ? withoutBody(response) : response;
     } catch (err) {
       console.error("[pages-worker] request failed", err);
-      return json({ error: "Internal server error" }, 500);
+      const response = json({ error: "Internal server error" }, 500);
+      return headOnly ? withoutBody(response) : response;
     }
   },
 };
+
+function withoutBody(response) {
+  return new Response(null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
 
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
