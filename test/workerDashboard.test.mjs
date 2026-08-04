@@ -244,6 +244,92 @@ test('Worker routes protect and render the modern dashboard and detail APIs', as
   database.close();
 });
 
+test('HEAD mirrors GET across Worker read routes and omits the response body', async () => {
+  const database = createDatabase();
+  const bucket = createBucket();
+  seedDatabase(database);
+  seedBucket(bucket);
+  bucket.putJson('pages/aaa111aaa111.json', {
+    id: 'aaa111aaa111',
+    title: 'Alpha Report',
+    private: false,
+    reviewable: true,
+  });
+
+  const env = {
+    PAGES_DB: d1(database),
+    PAGES_BUCKET: bucket,
+    PAGES_API_TOKEN: 'test-token',
+    SESSION_SECRET: 'worker-session-secret',
+    BASE_URL: 'https://pages.example.test',
+    GOOGLE_CLIENT_ID: 'test-client',
+    GOOGLE_CLIENT_SECRET: 'test-secret',
+    ALLOWED_EMAILS: 'tester@example.com',
+  };
+  const cookie = `pages.session=${signSession({ email: 'tester@example.com', exp: Math.floor(Date.now() / 1000) + 60 }, env.SESSION_SECRET)}`;
+  const cases = [
+    ['/', 200],
+    ['/dashboard', 200],
+    ['/dashboard/documents/alpha-doc', 200],
+    ['/api/dashboard/documents', 200],
+    ['/api/dashboard/pages', 200],
+    ['/api/dashboard/documents/alpha-doc', 200],
+    ['/api/dashboard/pages/ccc333ccc333', 200],
+    ['/api/documents/alpha-doc', 200],
+    ['/api/annotations/aaa111aaa111', 200],
+    ['/auth/error', 403],
+    ['/auth/logout', 302],
+    ['/d/alpha-doc', 302],
+    ['/d/alpha-doc/', 200],
+    ['/d/alpha-doc/r/1', 302],
+    ['/d/alpha-doc/r/1/', 200],
+    ['/p/ccc333ccc333', 302],
+    ['/p/ccc333ccc333/', 200],
+    ['/p/ccc333ccc333/chart.svg', 200],
+    ['/missing', 404],
+  ];
+
+  for (const [path, expectedStatus] of cases) {
+    const headers = { Cookie: cookie };
+    const getResponse = await worker.fetch(
+      new Request(`https://pages.example.test${path}`, { headers }),
+      env,
+      { waitUntil() {} },
+    );
+    const headResponse = await worker.fetch(
+      new Request(`https://pages.example.test${path}`, { method: 'HEAD', headers }),
+      env,
+      { waitUntil() {} },
+    );
+
+    assert.equal(getResponse.status, expectedStatus, `${path} GET status`);
+    assert.equal(headResponse.status, getResponse.status, `${path} HEAD status`);
+    assert.equal(headResponse.statusText, getResponse.statusText, `${path} statusText`);
+    assert.deepEqual([...headResponse.headers], [...getResponse.headers], `${path} headers`);
+    assert.equal(await headResponse.text(), '', `${path} body`);
+    if (path === '/d/alpha-doc/' || path === '/p/ccc333ccc333/chart.svg') {
+      assert.match(headResponse.headers.get('content-length'), /^[1-9][0-9]*$/, `${path} content-length`);
+    }
+    if (path === '/auth/logout') {
+      assert.equal(headResponse.headers.getSetCookie().length, 3, `${path} set-cookie count`);
+    }
+  }
+
+  const googleAuthHead = await worker.fetch(
+    new Request('https://pages.example.test/auth/google?returnTo=%2Fdashboard', { method: 'HEAD' }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(googleAuthHead.status, 302);
+  assert.equal(await googleAuthHead.text(), '');
+  assert.deepEqual(
+    googleAuthHead.headers.getSetCookie().map((cookie) => cookie.split('=', 1)[0]).sort(),
+    ['pages.oauth_state', 'pages.return_to'],
+  );
+
+  database.close();
+});
+
 function createDatabase() {
   const database = new Database(':memory:');
   database.exec(`
@@ -256,7 +342,9 @@ function createDatabase() {
       status TEXT NOT NULL, created_at TEXT NOT NULL
     );
     CREATE TABLE comments (
-      comment_id TEXT PRIMARY KEY, rev_id TEXT NOT NULL, body TEXT NOT NULL
+      comment_id TEXT PRIMARY KEY, rev_id TEXT NOT NULL, anchor TEXT NOT NULL,
+      body TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL,
+      resolved INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE webhook_secrets (
       rev_id TEXT PRIMARY KEY, secret TEXT NOT NULL
@@ -290,9 +378,10 @@ function seedDatabase(database) {
   insertRevision.run('bbb222bbb222', 'doc-beta', 1, 'published', '2026-07-20T03:00:00Z');
   insertRevision.run('ccc333ccc333', 'anon-ccc', 1, 'published', '2026-07-20T06:00:00Z');
   insertRevision.run('ddd444ddd444', 'anon-ddd', 1, 'published', '2026-07-20T02:00:00Z');
-  database.prepare('INSERT INTO comments VALUES (?, ?, ?)').run('comment-1', 'aaa111aaa111', 'One');
-  database.prepare('INSERT INTO comments VALUES (?, ?, ?)').run('comment-2', 'aaa111aaa111', 'Two');
-  database.prepare('INSERT INTO comments VALUES (?, ?, ?)').run('comment-page', 'ccc333ccc333', 'Page note');
+  const insertComment = database.prepare('INSERT INTO comments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  insertComment.run('comment-1', 'aaa111aaa111', '{}', 'One', 'tester', '2026-07-20T05:01:00Z', 0, '{"id":"comment-1","body":"One"}', '2026-07-20T05:01:00Z');
+  insertComment.run('comment-2', 'aaa111aaa111', '{}', 'Two', 'tester', '2026-07-20T05:02:00Z', 0, '{"id":"comment-2","body":"Two"}', '2026-07-20T05:02:00Z');
+  insertComment.run('comment-page', 'ccc333ccc333', '{}', 'Page note', 'tester', '2026-07-20T06:01:00Z', 0, '{"id":"comment-page","body":"Page note"}', '2026-07-20T06:01:00Z');
   database.prepare('INSERT INTO webhook_secrets VALUES (?, ?)').run('ccc333ccc333', 'secret');
   database.prepare('INSERT INTO revision_bundles (rev_id, entrypoint) VALUES (?, ?)').run('ccc333ccc333', 'index.html');
   database.prepare('INSERT INTO revision_assets (rev_id, path, bytes_key) VALUES (?, ?, ?)').run(
