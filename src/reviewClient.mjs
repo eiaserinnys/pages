@@ -1,12 +1,13 @@
-// Runs in the published document, isolated from its styles by a shadow root.
-export function mountReview() {
+// Browser source stays literal so Worker bundling cannot introduce server-side helpers.
+export const reviewClientSource = `
+(function mountReview() {
   const config = window.__PAGES_REVIEW__;
   if (!config || document.getElementById('pages-review')) return;
   const host = document.createElement('div');
   host.id = 'pages-review';
   host.style.cssText = 'position:fixed;inset:auto 16px 16px auto;z-index:2147483647';
   const root = host.attachShadow({ mode: 'open' });
-  root.innerHTML = `<style>
+  root.innerHTML = \`<style>
     :host{font:15px/1.5 system-ui,sans-serif;color:#202124;color-scheme:light}
     *{box-sizing:border-box}button,input,textarea{font:inherit}button{cursor:pointer;border:1px solid #c7cbd1;border-radius:8px;padding:9px 14px;background:#fff;color:#202124}
     button:disabled{opacity:.6;cursor:wait}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #4788ef}
@@ -22,7 +23,7 @@ export function mountReview() {
     <blockquote id="quote" hidden></blockquote>
     <label>댓글<textarea id="body" required maxlength="10000"></textarea></label>
     <button id="submit" type="submit">댓글 남기기</button></form>
-  </section><button id="toggle" type="button" aria-expanded="false">댓글</button>`;
+  </section><button id="toggle" type="button" aria-expanded="false">댓글</button>\`;
   document.body.append(host);
   const el = (id) => root.getElementById(id);
   let quote = '';
@@ -59,7 +60,7 @@ export function mountReview() {
         item.append(body);
         el('messages').append(item);
       }
-      message(data.comments.length ? `댓글 ${data.comments.length}개` : '아직 댓글이 없습니다.');
+      message(data.comments.length ? \`댓글 \${data.comments.length}개\` : '아직 댓글이 없습니다.');
     } catch (error) { if (currentLoad === loadId) message(error.message); }
   }
   function close() { el('panel').hidden = true; el('toggle').setAttribute('aria-expanded', 'false'); el('toggle').focus(); }
@@ -98,6 +99,5 @@ export function mountReview() {
     } catch (error) { message(error.message); }
     finally { el('submit').disabled = false; el('body').disabled = false; el('author').disabled = false; }
   };
-}
-
-export const reviewClientSource = `(${mountReview.toString()})();`;
+})();
+`;
