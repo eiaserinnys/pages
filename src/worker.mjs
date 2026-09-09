@@ -1,3 +1,4 @@
+import { reviewClientSource } from './reviewClient.mjs';
 import dashboardModule from './dashboard.js';
 import {
   dashboardQuery as readDashboardQuery,
@@ -170,8 +171,10 @@ async function routeRequest(request, env, ctx) {
   }
 
   const annotationMatch = pathname.match(/^\/api\/annotations\/([0-9a-f]{12})$/);
-  if (annotationMatch && request.method === "GET") return listAnnotations(env, annotationMatch[1]);
+  if (annotationMatch && request.method === "GET") return listAnnotations(request, env, annotationMatch[1]);
   if (annotationMatch && request.method === "PUT") return replaceAnnotations(request, env, ctx, annotationMatch[1]);
+
+  if (annotationMatch && request.method === "POST") return appendAnnotation(request, env, ctx, annotationMatch[1]);
 
   const visibilityMatch = pathname.match(/^\/api\/pages\/([0-9a-f]{12})\/visibility$/);
   if (visibilityMatch && request.method === "PATCH") {
@@ -451,12 +454,26 @@ async function sendPageAsset(request, env, pageId, assetPath = "") {
   if (!asset) {
     const object = await env.PAGES_BUCKET.get(pageHtmlKey(pageId));
     if (!object) return notFound();
-    return objectResponse(object, "text/html; charset=utf-8");
+    return reviewPageResponse(object, "text/html; charset=utf-8", meta, env);
   }
 
   const object = await env.PAGES_BUCKET.get(asset.bytesKey);
   if (!object) return notFound();
-  return objectResponse(object, asset.contentType);
+  return reviewPageResponse(object, asset.contentType, meta, env);
+}
+
+async function reviewPageResponse(object, contentType, meta, env) {
+  if (!meta.reviewable || !/^text\/html(?:;|$)/i.test(contentType)) return objectResponse(object, contentType);
+  const issued = await issueAnnotationToken({ revId: meta.id, secret: env.SESSION_SECRET, ttlSeconds: ANNOTATION_TOKEN_TTL_SECONDS });
+  const config = { revId: meta.id, annotationsUrl: `/api/annotations/${meta.id}`,
+    tokenHeader: ANNOTATION_TOKEN_HEADER, capabilityToken: issued.token, expiresAt: issued.expiresAt };
+  // Refresh legacy upload-time tokens without changing stored revisions or their content.
+  const source = (await object.text()).replace(/<script>window\.__PAGES_REVIEW__=[\s\S]*?<\/script>/g, '');
+  const boot = `<script>window.__PAGES_REVIEW__=${safeJson(config)};${reviewClientSource}</script>`;
+  const body = /<\/body>/i.test(source) ? source.replace(/<\/body>/i, () => `${boot}\n</body>`) : `${source}\n${boot}`;
+  const response = html(body);
+  response.headers.set("Content-Length", String(textEncode(body).byteLength));
+  return response;
 }
 
 async function getDocumentApi(request, env, slug) {
@@ -518,16 +535,68 @@ async function deletePage(env, pageId) {
   return new Response(null, { status: 204 });
 }
 
-async function listAnnotations(env, revId) {
+async function listAnnotations(request, env, revId) {
   const meta = await readMeta(env, revId);
   if (!meta || meta.reviewable !== true) return json({ error: "Not found" }, 404);
+  if (meta.private) {
+    const auth = await requireAuth(request, env, { json: true });
+    if (auth.response) return auth.response;
+  }
   return json(await getCommentsPayload(env, revId));
+}
+
+async function appendAnnotation(request, env, ctx, revId) {
+  const meta = await readMeta(env, revId);
+  if (!meta?.reviewable) return json({ error: "Not found" }, 404);
+  if (meta.private) {
+    const auth = await requireAuth(request, env, { json: true });
+    if (auth.response) return auth.response;
+  }
+  const verification = await verifyAnnotationToken(readAnnotationToken(request), { revId, secret: env.SESSION_SECRET });
+  if (!verification.ok) return json({ error: "Unauthorized", reason: verification.error }, 401);
+  let raw;
+  try { raw = await request.json(); } catch { return json({ error: "request body must be JSON" }, 400); }
+  if (!raw || typeof raw.id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(raw.id)
+    || typeof raw.comment !== 'string' || !raw.comment.trim() || raw.comment.length > 10000
+    || (raw.author !== undefined && (typeof raw.author !== 'string' || raw.author.length > 100))
+    || (raw.selected_text !== undefined && (typeof raw.selected_text !== 'string' || raw.selected_text.length > 2000))) {
+    return json({ error: "Invalid comment" }, 400);
+  }
+  const comment = normalizeComment(revId, { id: raw.id, comment: raw.comment.trim(),
+    author: raw.author?.trim() || '익명', selected_text: raw.selected_text || '' }, 0);
+  const anchor = { document_id: revId, selected_text: comment.selected_text, block_id: '', prefix: '', suffix: '' };
+  const result = await env.PAGES_DB.prepare(`INSERT INTO comments
+    (comment_id, rev_id, anchor, body, author, created_at, resolved, payload_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(comment_id) DO NOTHING`).bind(
+    comment.id, revId, JSON.stringify(anchor), comment.comment, comment.author,
+    comment.created_at, JSON.stringify(comment), comment.created_at).run();
+  if (!result.meta.changes) {
+    const existing = await env.PAGES_DB.prepare('SELECT rev_id, payload_json FROM comments WHERE comment_id = ?').bind(comment.id).first();
+    const saved = existing && JSON.parse(existing.payload_json);
+    if (existing?.rev_id !== revId || saved.comment !== comment.comment || saved.author !== comment.author || saved.selected_text !== comment.selected_text) {
+      return json({ error: "Comment ID already used" }, 409);
+    }
+    return json({ ok: true, revId, id: comment.id });
+  }
+  if (meta.review?.webhookUrl) {
+    ctx.waitUntil((async () => {
+      const secret = await getWebhookSecret(env, revId);
+      const count = (await getCommentsPayload(env, revId)).comments.length;
+      await postAnnotationWebhook({ url: meta.review.webhookUrl,
+        payload: buildAnnotationWebhookEvent({ revId, count }), secret });
+    })().catch(error => console.error('[pages-worker] annotation webhook failed', error)));
+  }
+  return json({ ok: true, revId, id: comment.id }, 201);
 }
 
 async function replaceAnnotations(request, env, ctx, revId) {
   const meta = await readMeta(env, revId);
   if (!meta || meta.reviewable !== true) return json({ error: "Not found" }, 404);
 
+  if (meta.private) {
+    const auth = await requireAuth(request, env, { json: true });
+    if (auth.response) return auth.response;
+  }
   const token = readAnnotationToken(request);
   const tokenResult = await verifyAnnotationToken(token, { revId, secret: env.SESSION_SECRET });
   if (!tokenResult.ok) return json({ error: "Unauthorized", reason: tokenResult.error }, 401);

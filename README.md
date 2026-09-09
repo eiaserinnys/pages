@@ -187,7 +187,11 @@ Review comments remain scoped to a single `revId`. Publishing a new revision sta
 GET /api/annotations/:revId
 ```
 
-Returns the comments payload for one reviewable revision. Non-reviewable pages return `404`.
+Returns the comments payload for one reviewable revision. Non-reviewable pages return `404`. On the Cloudflare Worker, private revisions require a Google session for reads and writes.
+
+The Worker injects a comment button and an isolated review panel when serving reviewable HTML, including previously published revisions. Opening the page refreshes its 14-day capability token. Public review pages do not require Google sign-in. Select text before opening the panel to attach a quotation.
+
+The review panel uses `POST /api/annotations/:revId` with the capability header and `{ "id": "client-generated-unique-id", "comment": "Text", "author": "Optional name", "selected_text": "Optional quote" }`. This appends one comment without replacing existing comments. Identical retries with the same ID succeed without duplication; conflicting ID reuse returns `409`. The legacy Express server does not provide this UI or append endpoint.
 
 ```
 PUT /api/annotations/:revId
