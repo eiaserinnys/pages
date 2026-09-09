@@ -176,6 +176,13 @@ async function routeRequest(request, env, ctx) {
 
   if (annotationMatch && request.method === "POST") return appendAnnotation(request, env, ctx, annotationMatch[1]);
 
+  const replyMatch = pathname.match(/^\/api\/annotations\/([0-9a-f]{12})\/([^/]+)\/replies$/);
+  if (replyMatch && request.method === "POST") {
+    const commentId = safeDecodeURIComponent(replyMatch[2]);
+    if (!commentId) return json({ error: "Not found" }, 404);
+    return appendAnnotationReply(request, env, ctx, replyMatch[1], commentId);
+  }
+
   const visibilityMatch = pathname.match(/^\/api\/pages\/([0-9a-f]{12})\/visibility$/);
   if (visibilityMatch && request.method === "PATCH") {
     const auth = await requireAuth(request, env);
@@ -459,13 +466,13 @@ async function sendPageAsset(request, env, pageId, assetPath = "") {
 
   const object = await env.PAGES_BUCKET.get(asset.bytesKey);
   if (!object) return notFound();
-  return reviewPageResponse(object, asset.contentType, meta, env);
+  return reviewPageResponse(object, asset.contentType, meta, env, asset.path, asset.isEntrypoint);
 }
 
-async function reviewPageResponse(object, contentType, meta, env) {
+async function reviewPageResponse(object, contentType, meta, env, assetPath = "index.html", isEntrypoint = true) {
   if (!meta.reviewable || !/^text\/html(?:;|$)/i.test(contentType)) return objectResponse(object, contentType);
   const issued = await issueAnnotationToken({ revId: meta.id, secret: env.SESSION_SECRET, ttlSeconds: ANNOTATION_TOKEN_TTL_SECONDS });
-  const config = { revId: meta.id, annotationsUrl: `/api/annotations/${meta.id}`,
+  const config = { revId: meta.id, assetPath, isEntrypoint, annotationsUrl: `/api/annotations/${meta.id}`,
     tokenHeader: ANNOTATION_TOKEN_HEADER, capabilityToken: issued.token, expiresAt: issued.expiresAt };
   // Refresh legacy upload-time tokens without changing stored revisions or their content.
   const source = (await object.text()).replace(/<script>window\.__PAGES_REVIEW__=[\s\S]*?<\/script>/g, '');
@@ -535,71 +542,123 @@ async function deletePage(env, pageId) {
   return new Response(null, { status: 204 });
 }
 
-async function listAnnotations(request, env, revId) {
+async function annotationAccess(request, env, revId, write = false) {
   const meta = await readMeta(env, revId);
-  if (!meta || meta.reviewable !== true) return json({ error: "Not found" }, 404);
+  if (!meta || meta.reviewable !== true) return { response: json({ error: "Not found" }, 404) };
   if (meta.private) {
     const auth = await requireAuth(request, env, { json: true });
-    if (auth.response) return auth.response;
+    if (auth.response) return auth;
   }
-  return json(await getCommentsPayload(env, revId));
+  if (write) {
+    const result = await verifyAnnotationToken(readAnnotationToken(request), { revId, secret: env.SESSION_SECRET });
+    if (!result.ok) return { response: json({ error: "Unauthorized", reason: result.error }, 401) };
+  }
+  return { meta };
+}
+
+async function listAnnotations(request, env, revId) {
+  const access = await annotationAccess(request, env, revId);
+  return access.response || json(await getCommentsPayload(env, revId));
+}
+
+function newAnnotationText(raw) {
+  if (!raw || typeof raw.id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(raw.id)
+    || typeof raw.comment !== 'string' || !raw.comment.trim() || raw.comment.length > 10000
+    || (raw.author !== undefined && (typeof raw.author !== 'string' || raw.author.length > 100))) {
+    throw new Error('Invalid comment');
+  }
+  return { id: raw.id, comment: raw.comment.trim(), author: raw.author?.trim() || '익명' };
+}
+
+function newAnnotationAnchor(raw) {
+  for (const [key, limit] of Object.entries({selected_text:2000,block_id:512,prefix:64,suffix:64,asset_path:512})) {
+    if (raw[key] !== undefined && (typeof raw[key] !== 'string' || raw[key].length > limit)) throw new Error('Invalid anchor');
+  }
+  const position = raw.text_position;
+  if (position !== undefined && (!position || !Number.isSafeInteger(position.start) || !Number.isSafeInteger(position.end)
+    || position.start < 0 || position.end <= position.start || position.end - position.start !== (raw.selected_text || '').length)) {
+    throw new Error('Invalid text position');
+  }
+  return { selected_text:raw.selected_text || '', block_id:raw.block_id || '', prefix:raw.prefix || '', suffix:raw.suffix || '',
+    asset_path:raw.asset_path ? normalizeBundlePath(raw.asset_path) : '',
+    ...(position ? {text_position:{start:position.start,end:position.end}} : {}) };
+}
+
+function annotationAnchor(comment) {
+  return { document_id:comment.document_id, block_id:comment.block_id, selected_text:comment.selected_text,
+    prefix:comment.prefix, suffix:comment.suffix, asset_path:comment.asset_path || '',
+    ...(comment.text_position ? {text_position:comment.text_position} : {}) };
+}
+
+function sameAnnotationText(left, right) {
+  return left?.comment === right.comment && left?.author === right.author;
+}
+
+function notifyAnnotation(env, ctx, meta, revId) {
+  if (!meta.review?.webhookUrl) return;
+  ctx.waitUntil((async () => {
+    const secret = await getWebhookSecret(env, revId);
+    const count = (await getCommentsPayload(env, revId)).comments.length;
+    await postAnnotationWebhook({url:meta.review.webhookUrl,payload:buildAnnotationWebhookEvent({revId,count}),secret});
+  })().catch(error => console.error('[pages-worker] annotation webhook failed', error)));
 }
 
 async function appendAnnotation(request, env, ctx, revId) {
-  const meta = await readMeta(env, revId);
-  if (!meta?.reviewable) return json({ error: "Not found" }, 404);
-  if (meta.private) {
-    const auth = await requireAuth(request, env, { json: true });
-    if (auth.response) return auth.response;
-  }
-  const verification = await verifyAnnotationToken(readAnnotationToken(request), { revId, secret: env.SESSION_SECRET });
-  if (!verification.ok) return json({ error: "Unauthorized", reason: verification.error }, 401);
-  let raw;
-  try { raw = await request.json(); } catch { return json({ error: "request body must be JSON" }, 400); }
-  if (!raw || typeof raw.id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(raw.id)
-    || typeof raw.comment !== 'string' || !raw.comment.trim() || raw.comment.length > 10000
-    || (raw.author !== undefined && (typeof raw.author !== 'string' || raw.author.length > 100))
-    || (raw.selected_text !== undefined && (typeof raw.selected_text !== 'string' || raw.selected_text.length > 2000))) {
-    return json({ error: "Invalid comment" }, 400);
-  }
-  const comment = normalizeComment(revId, { id: raw.id, comment: raw.comment.trim(),
-    author: raw.author?.trim() || '익명', selected_text: raw.selected_text || '' }, 0);
-  const anchor = { document_id: revId, selected_text: comment.selected_text, block_id: '', prefix: '', suffix: '' };
+  const access = await annotationAccess(request, env, revId, true);
+  if (access.response) return access.response;
+  let comment;
+  try {
+    const raw = await request.json();
+    comment = normalizeComment(revId, {...newAnnotationText(raw),...newAnnotationAnchor(raw)},0);
+  } catch (error) { return json({error:error.message},400); }
   const result = await env.PAGES_DB.prepare(`INSERT INTO comments
     (comment_id, rev_id, anchor, body, author, created_at, resolved, payload_json, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(comment_id) DO NOTHING`).bind(
-    comment.id, revId, JSON.stringify(anchor), comment.comment, comment.author,
-    comment.created_at, JSON.stringify(comment), comment.created_at).run();
+    comment.id,revId,JSON.stringify(annotationAnchor(comment)),comment.comment,comment.author,
+    comment.created_at,JSON.stringify(comment),comment.created_at).run();
   if (!result.meta.changes) {
     const existing = await env.PAGES_DB.prepare('SELECT rev_id, payload_json FROM comments WHERE comment_id = ?').bind(comment.id).first();
     const saved = existing && JSON.parse(existing.payload_json);
-    if (existing?.rev_id !== revId || saved.comment !== comment.comment || saved.author !== comment.author || saved.selected_text !== comment.selected_text) {
-      return json({ error: "Comment ID already used" }, 409);
+    if (existing?.rev_id !== revId || !sameAnnotationText(saved,comment)
+      || JSON.stringify(annotationAnchor(saved)) !== JSON.stringify(annotationAnchor(comment))) {
+      return json({error:'Comment ID already used'},409);
     }
-    return json({ ok: true, revId, id: comment.id });
+    return json({ok:true,revId,id:comment.id});
   }
-  if (meta.review?.webhookUrl) {
-    ctx.waitUntil((async () => {
-      const secret = await getWebhookSecret(env, revId);
-      const count = (await getCommentsPayload(env, revId)).comments.length;
-      await postAnnotationWebhook({ url: meta.review.webhookUrl,
-        payload: buildAnnotationWebhookEvent({ revId, count }), secret });
-    })().catch(error => console.error('[pages-worker] annotation webhook failed', error)));
+  notifyAnnotation(env,ctx,access.meta,revId);
+  return json({ok:true,revId,id:comment.id},201);
+}
+
+async function appendAnnotationReply(request, env, ctx, revId, commentId) {
+  const access = await annotationAccess(request,env,revId,true);
+  if (access.response) return access.response;
+  let reply;
+  try { reply = {...newAnnotationText(await request.json()),created_at:new Date().toISOString()}; }
+  catch(error) { return json({error:error.message},400); }
+  // One atomic JSON append: concurrent replies never read and replace the thread.
+  const result = await env.PAGES_DB.prepare(`UPDATE comments SET
+    payload_json = json_set(payload_json, '$.replies', json_insert(
+      CASE WHEN json_type(payload_json,'$.replies') = 'array' THEN json_extract(payload_json,'$.replies') ELSE '[]' END,
+      '$[#]', json(?))), updated_at = ?
+    WHERE rev_id = ? AND comment_id = ? AND NOT EXISTS (
+      SELECT 1 FROM json_each(payload_json,'$.replies')
+      WHERE CASE WHEN type = 'object' THEN json_extract(value,'$.id') END = ?
+    )`).bind(JSON.stringify(reply),reply.created_at,revId,commentId,reply.id).run();
+  if (!result.meta.changes) {
+    const row = await env.PAGES_DB.prepare('SELECT payload_json FROM comments WHERE rev_id = ? AND comment_id = ?').bind(revId,commentId).first();
+    if (!row) return json({error:'Not found'},404);
+    const saved = (JSON.parse(row.payload_json).replies || []).find(item => item?.id === reply.id);
+    if (!sameAnnotationText(saved,reply)) return json({error:'Reply ID already used'},409);
+    return json({ok:true,revId,id:reply.id,commentId});
   }
-  return json({ ok: true, revId, id: comment.id }, 201);
+  notifyAnnotation(env,ctx,access.meta,revId);
+  return json({ok:true,revId,id:reply.id,commentId},201);
 }
 
 async function replaceAnnotations(request, env, ctx, revId) {
-  const meta = await readMeta(env, revId);
-  if (!meta || meta.reviewable !== true) return json({ error: "Not found" }, 404);
-
-  if (meta.private) {
-    const auth = await requireAuth(request, env, { json: true });
-    if (auth.response) return auth.response;
-  }
-  const token = readAnnotationToken(request);
-  const tokenResult = await verifyAnnotationToken(token, { revId, secret: env.SESSION_SECRET });
-  if (!tokenResult.ok) return json({ error: "Unauthorized", reason: tokenResult.error }, 401);
+  const access = await annotationAccess(request,env,revId,true);
+  if (access.response) return access.response;
+  const {meta} = access;
 
   let body;
   try {
@@ -618,13 +677,7 @@ async function replaceAnnotations(request, env, ctx, revId) {
   await env.PAGES_DB.prepare("DELETE FROM comments WHERE rev_id = ?").bind(revId).run();
   for (const comment of payload.comments) {
     const now = new Date().toISOString();
-    const anchor = {
-      document_id: comment.document_id,
-      block_id: comment.block_id,
-      selected_text: comment.selected_text,
-      prefix: comment.prefix,
-      suffix: comment.suffix,
-    };
+    const anchor = annotationAnchor(comment);
     await env.PAGES_DB.prepare(`
       INSERT INTO comments (
         comment_id, rev_id, anchor, body, author, created_at, resolved, payload_json, updated_at
@@ -988,7 +1041,7 @@ async function getAsset(env, revId, requestPath) {
     FROM revision_assets
     WHERE rev_id = ? AND path = ?
   `).bind(revId, assetPath).first();
-  return row ? formatAssetRow(row) : null;
+  return row ? { ...formatAssetRow(row), isEntrypoint: assetPath === bundle.entrypoint } : null;
 }
 
 function buildManifest({ revId, docId, entrypoint, files, createdAt }) {
