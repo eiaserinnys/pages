@@ -48,8 +48,6 @@ jobs:
 
       - run: npx playwright install --with-deps chromium
 
-      - run: npm run test:review-browser
-
       - run: npm run worker:check
 
       - name: Stop automatic deploy when migrations changed
@@ -65,6 +63,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.apply_d1_migrations
         run: npm run worker:migrate:d1
 
-      - run: npm run worker:dry-run
+      - run: npm run worker:dry-run -- --outdir /tmp/pages-review-worker
+
+      - run: REVIEW_WORKER_MODULE=file:///tmp/pages-review-worker/worker.js npm run test:review-browser
 
       - run: npx --yes wrangler@4.86.0 deploy
