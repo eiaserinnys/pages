@@ -1,5 +1,6 @@
 import { reviewClientSource } from './reviewClient.mjs';
 import dashboardModule from './dashboard.js';
+import { createVtuberLiveSession } from './vtuberLive.mjs';
 import {
   dashboardQuery as readDashboardQuery,
   deleteDashboardPageData,
@@ -116,6 +117,10 @@ function withoutBody(response) {
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
   const pathname = url.pathname;
+
+  if (request.method === 'POST' && pathname === '/api/vtuber-live/session') {
+    return createVtuberLiveSession(request, env, await getSession(request, env));
+  }
 
   if (request.method === "GET" && pathname === "/auth/google") return startGoogleAuth(request, env);
   if (request.method === "GET" && pathname === "/auth/google/callback") return completeGoogleAuth(request, env);
