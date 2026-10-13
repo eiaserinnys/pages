@@ -41,6 +41,8 @@ try {
     const text = `Browser ${viewport.width} <img src=x onerror=alert(1)>`;
     await page.locator('#pages-review #author').fill('검증');
     await page.locator('#pages-review #body').fill(text);
+    // The overlay is painted in requestAnimationFrame, independently of input filling.
+    await page.locator('#pages-review .draft').first().waitFor();
     assert.ok(await page.locator('#pages-review .draft').count()>0);
     failSave = true;
     await page.locator('#pages-review #submit').click();
