@@ -253,9 +253,19 @@ async function uploadPage(request, env) {
     return json({ error: "request body must be JSON" }, 400);
   }
 
+  const reviewPathsError = validateReviewPathsField(body);
+  if (reviewPathsError) return json({ error: reviewPathsError }, 400);
+
   let bundle;
   try {
     bundle = normalizeUploadBundle(body);
+  } catch (err) {
+    return json({ error: err.message }, err.statusCode || 400);
+  }
+
+  let reviewPaths;
+  try {
+    reviewPaths = normalizeReviewPaths(body.reviewPaths, bundle);
   } catch (err) {
     return json({ error: err.message }, err.statusCode || 400);
   }
@@ -285,7 +295,9 @@ async function uploadPage(request, env) {
       expiresAt: review.expiresAt,
     };
     try {
-      bundle = withPatchedEntrypoint(bundle, (entryHtml) => injectReviewConfig(entryHtml, review));
+      if (!reviewPaths || reviewPaths.includes(bundle.entrypoint)) {
+        bundle = withPatchedEntrypoint(bundle, (entryHtml) => injectReviewConfig(entryHtml, review));
+      }
       webhook = await normalizeAndSaveWebhook(env, id, body.webhookUrl, body.webhookSecret);
     } catch (err) {
       return json({ error: err.message }, err.statusCode || 400);
@@ -333,6 +345,7 @@ async function uploadPage(request, env) {
     isPrivate: body.private === true,
     documentRecord,
     review,
+    reviewPaths,
     webhook,
     manifest,
   });
@@ -355,7 +368,36 @@ function validateUploadOptions({ reviewable, webhookUrl, webhookSecret, doc, own
   return "";
 }
 
-function buildPageMeta({ id, title, createdAt, isPrivate, documentRecord, review, webhook, manifest }) {
+function validateReviewPathsField(body) {
+  if (body === null) return "";
+  if (!Object.hasOwn(body, "reviewPaths")) return "";
+  if (body.reviewable !== true) return "reviewPaths requires reviewable=true";
+  if (!Array.isArray(body.reviewPaths) || body.reviewPaths.length === 0 || body.reviewPaths.some((path) => typeof path !== "string")) {
+    return "reviewPaths must be a non-empty array of bundle paths";
+  }
+  return "";
+}
+
+function normalizeReviewPaths(paths, bundle) {
+  if (paths === undefined) return undefined;
+  const normalized = [];
+  const seen = new Set();
+  for (const rawPath of paths) {
+    const assetPath = normalizeBundlePath(rawPath);
+    const file = bundle.files.find((candidate) => candidate.path === assetPath);
+    if (!file) throw httpError(`reviewPaths entry not found in bundle: ${assetPath}`);
+    if (!/^text\/html(?:;|$)/i.test(file.contentType)) {
+      throw httpError(`reviewPaths entry is not HTML: ${assetPath}`);
+    }
+    if (!seen.has(assetPath)) {
+      seen.add(assetPath);
+      normalized.push(assetPath);
+    }
+  }
+  return normalized;
+}
+
+function buildPageMeta({ id, title, createdAt, isPrivate, documentRecord, review, reviewPaths, webhook, manifest }) {
   const meta = {
     id,
     title,
@@ -381,6 +423,7 @@ function buildPageMeta({ id, title, createdAt, isPrivate, documentRecord, review
   }
   if (review) {
     meta.reviewable = true;
+    if (reviewPaths !== undefined) meta.reviewPaths = reviewPaths;
     meta.review = {
       revId: review.revId,
       annotationsUrl: review.annotationsUrl,
@@ -475,7 +518,10 @@ async function sendPageAsset(request, env, pageId, assetPath = "") {
 }
 
 async function reviewPageResponse(object, contentType, meta, env, assetPath = "index.html", isEntrypoint = true) {
-  if (!meta.reviewable || !/^text\/html(?:;|$)/i.test(contentType)) return objectResponse(object, contentType);
+  if (!meta.reviewable || !/^text\/html(?:;|$)/i.test(contentType)
+    || (Array.isArray(meta.reviewPaths) && !meta.reviewPaths.includes(assetPath))) {
+    return objectResponse(object, contentType);
+  }
   const issued = await issueAnnotationToken({ revId: meta.id, secret: env.SESSION_SECRET, ttlSeconds: ANNOTATION_TOKEN_TTL_SECONDS });
   const config = { revId: meta.id, assetPath, isEntrypoint, annotationsUrl: `/api/annotations/${meta.id}`,
     tokenHeader: ANNOTATION_TOKEN_HEADER, capabilityToken: issued.token, expiresAt: issued.expiresAt };
