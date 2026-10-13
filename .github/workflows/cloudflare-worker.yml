@@ -18,6 +18,25 @@ on:
       - "src/reviewClient.mjs"
       - "src/workerDashboard.mjs"
       - "wrangler.toml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/cloudflare-worker.yml"
+      - "migrations/**"
+      - "package.json"
+      - "package-lock.json"
+      - "src/dashboard.js"
+      - "src/dashboardClient.js"
+      - "src/dashboardData.js"
+      - "src/dashboardStyles.js"
+      - "src/worker.mjs"
+      - "src/vtuberLive.mjs"
+      - "src/reviewClient.mjs"
+      - "src/workerDashboard.mjs"
+      - "wrangler.toml"
+      - "scripts/review-browser.mjs"
+      - "test/**"
   workflow_dispatch:
     inputs:
       apply_d1_migrations:
@@ -61,7 +80,7 @@ jobs:
           fi
 
       - name: Apply D1 migrations
-        if: github.event_name == 'workflow_dispatch' && inputs.apply_d1_migrations
+        if: github.event_name != 'pull_request' && github.event_name == 'workflow_dispatch' && inputs.apply_d1_migrations
         run: npm run worker:migrate:d1
 
       - run: npm run worker:dry-run -- --outdir /tmp/pages-review-worker
@@ -69,3 +88,4 @@ jobs:
       - run: REVIEW_WORKER_MODULE=file:///tmp/pages-review-worker/worker.js npm run test:review-browser
 
       - run: npx --yes wrangler@4.86.0 deploy
+        if: github.event_name != 'pull_request'

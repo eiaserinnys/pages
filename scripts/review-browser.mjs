@@ -23,7 +23,14 @@ try {
       const req = route.request();
       if (failSave && req.method() === 'POST') return route.fulfill({status:503,body:'unavailable'});
       const response = await worker.fetch(new Request(req.url(), {method:req.method(),headers:req.headers(),body:req.postData() || undefined}),env,{waitUntil(){}});
-      await route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:Buffer.from(await response.arrayBuffer())});
+      let bytes = Buffer.from(await response.arrayBuffer());
+      if (response.headers.get('content-type')?.includes('text/html')) {
+        bytes = Buffer.from(bytes.toString()
+          .replace('frame=0;const index=indexText();', 'window.__paintTrace={time:performance.now(),active,viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],draws:[]};frame=0;const index=indexText();')
+          .replace('const range=resolve(anchor,index);if(!range)return;', 'const range=resolve(anchor,index);window.__paintTrace.draws.push({anchor,resolved:!!range,draft});if(!range)return;')
+          .replace('for(const rect of rects){', 'Object.assign(window.__paintTrace.draws.at(-1),{clip,raw:Array.from(range.getClientRects()).map(r=>r.toJSON()),rects});for(const rect of rects){'));
+      }
+      await route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:bytes});
     });
     const page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
@@ -41,7 +48,13 @@ try {
     const text = `Browser ${viewport.width} <img src=x onerror=alert(1)>`;
     await page.locator('#pages-review #author').fill('검증');
     await page.locator('#pages-review #body').fill(text);
-    assert.ok(await page.locator('#pages-review .draft').count()>0);
+    const draftCount = await page.locator('#pages-review .draft').count();
+    console.log('DRAFT DIAGNOSTIC', viewport.width, draftCount, await page.evaluate(() => ({now:performance.now(),trace:window.__paintTrace,viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],second:document.querySelector('#second').getBoundingClientRect().toJSON(),font:getComputedStyle(document.body).font})));
+    if (!draftCount) {
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      console.log('AFTER TWO FRAMES', await page.locator('#pages-review .draft').count(), await page.evaluate(() => window.__paintTrace));
+    }
+    assert.ok(draftCount>0);
     failSave = true;
     await page.locator('#pages-review #submit').click();
     await page.locator('#pages-review #status').filter({hasText:'다시 시도'}).waitFor();
