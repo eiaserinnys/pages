@@ -17,6 +17,19 @@ try {
   for (const viewport of [{width:1280,height:900},{width:390,height:844}]) {
     database.prepare('DELETE FROM comments').run();
     const context = await browser.newContext({viewport});
+    await context.addInitScript(() => {
+      const raf = window.requestAnimationFrame.bind(window), held = [];
+      window.__frames = [];
+      window.requestAnimationFrame = callback => {
+        const entry = {name:callback.name,scheduled:performance.now(),executed:null};
+        window.__frames.push(entry);
+        return raf(time => {
+          const run = () => { entry.executed=performance.now();callback(time); };
+          if (window.__holdPaint) held.push(run); else run();
+        });
+      };
+      window.__releasePaint = () => { window.__holdPaint=false;held.splice(0).forEach(run=>raf(run)); };
+    });
     let failSave = false;
     const errors = [];
     await context.route('https://pages.example.test/**', async route => {
@@ -36,6 +49,7 @@ try {
       return {x1:a.left+1,y1:a.top+a.height/2,x2:b.left+1,y2:b.top+b.height/2};
     });
     await page.mouse.move(points.x1,points.y1);await page.mouse.down();await page.mouse.move(points.x2,points.y2,{steps:20});await page.mouse.up();
+    if (viewport.width===390) await page.evaluate(() => { window.__holdPaint=true; });
     await page.locator('#pages-review #trigger').click();
     assert.equal(await page.locator('#pages-review #quote').textContent(),'Repeated phrase');
     const text = `Browser ${viewport.width} <img src=x onerror=alert(1)>`;
@@ -46,10 +60,11 @@ try {
       console.log('DRAFT ZERO', JSON.stringify(await page.evaluate(() => {
         const p=document.querySelector('#second'),r=document.createRange();
         r.setStart(p.querySelector('strong').firstChild,0);r.setEnd(p.querySelector('strong').nextSibling,7);
-        return {now:performance.now(),viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],quote:document.querySelector('#pages-review').shadowRoot.querySelector('#quote').textContent,raw:Array.from(r.getClientRects()).map(r=>r.toJSON()),font:getComputedStyle(document.body).font};
+        return {now:performance.now(),frames:window.__frames,viewport:[innerWidth,innerHeight],scroll:[scrollX,scrollY],quote:document.querySelector('#pages-review').shadowRoot.querySelector('#quote').textContent,raw:Array.from(r.getClientRects()).map(r=>r.toJSON()),font:getComputedStyle(document.body).font};
       })));
+      await page.evaluate(() => window.__releasePaint());
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      console.log('AFTER TWO FRAMES', await page.locator('#pages-review .draft').count());
+      console.log('AFTER TWO FRAMES', await page.locator('#pages-review .draft').count(), JSON.stringify(await page.evaluate(()=>window.__frames)));
     }
     assert.ok(draftCount>0);
     failSave = true;
