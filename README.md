@@ -49,6 +49,7 @@ Content-Type: application/json
   "doc": "my-report",        // optional, opt-in stable document slug
   "private": false,          // optional, defaults to false
   "reviewable": false,       // optional, defaults to false
+  "reviewPaths": ["frame.html"], // optional, requires reviewable=true; omit to attach review UI to all HTML files
   "webhookUrl": "https://example.com/hook", // optional, requires reviewable=true
   "webhookSecret": "<signing secret>"       // optional, requires webhookUrl
 }
