@@ -1516,6 +1516,7 @@ async function getSession(request, env) {
   } catch {
     return null;
   }
+  if (payload.typ !== undefined) return null;
   if (!Number.isInteger(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) return null;
   return payload;
 }

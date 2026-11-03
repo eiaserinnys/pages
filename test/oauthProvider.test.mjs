@@ -118,6 +118,11 @@ test('OAuth discovery, loopback client registration, session authorize, PKCE exc
   assert.deepEqual(client.redirect_uris, [REDIRECT_URI]);
   assert.deepEqual(client.grant_types, ['authorization_code', 'refresh_token']);
 
+  const clientAsSession = await call(env, '/api/dashboard/pages', {
+    headers: { Cookie: `pages.session=${client.client_id}` },
+  });
+  assert.equal(clientAsSession.status, 302);
+
   for (const redirectUri of ['http://localhost:43127/callback', 'http://[::1]:43127/callback']) {
     assert.equal((await registerClient(env, redirectUri)).redirect_uris[0], redirectUri);
   }
