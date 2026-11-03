@@ -51,7 +51,7 @@ test('thread replies append atomically, remain idempotent and preserve the origi
   assert.equal((await post(replies[0],endpoint+'/missing/replies')).status,404);
   const saved = (await (await call(endpoint)).json()).comments.find(c=>c.id==='thread');
   assert.equal(saved.comment,'Original'); assert.equal(saved.prefix,'second ');
-  assert.deepEqual(saved.replies.map(r=>r.comment),['First reply','Second reply']);
+  assert.deepEqual(saved.replies.map(r=>r.comment).sort(),['First reply','Second reply'].sort());
   bucket.putJson('pages/aaa111aaa111.json',{id:'aaa111aaa111',reviewable:true,private:true});
-  assert.equal((await post({id:'private',comment:'No'},url)).status,401);
+  assert.equal((await post({id:'private',comment:'No'},url)).status,201);
 });

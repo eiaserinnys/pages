@@ -143,6 +143,12 @@ GET /d/:slug/r/:revNumber
 
 Serves that fixed revision's HTML. Revision URLs do not move when newer revisions are published.
 
+### OAuth access and private view links
+
+The Worker exposes OAuth metadata at `/.well-known/oauth-authorization-server`, dynamic client registration at `POST /auth/oauth/register`, authorization code with PKCE S256 at `GET /auth/oauth/authorize`, and token exchange or refresh at `POST /auth/oauth/token`. Register loopback HTTP redirect URIs. Google sign-in and `ALLOWED_EMAILS` authorize access. Access tokens expire after one hour; refresh tokens expire after 30 days.
+
+OAuth Bearer access is accepted by `GET /api/dashboard/documents`, `GET /api/dashboard/pages`, their detail routes, document and page visibility `PATCH` routes, and `DELETE /api/pages/:id`. The upload endpoint continues to use `PAGES_API_TOKEN`. Authenticated list and detail responses include `url` and `viewUrl`; public items use the public URL for both, while private items receive a signed seven-day `/v/:token/` link that opens the page and its relative assets without a session cookie.
+
 ```
 GET /p/:pageId/:path
 GET /d/:slug/:path
@@ -188,7 +194,7 @@ Review comments remain scoped to a single `revId`. Publishing a new revision sta
 GET /api/annotations/:revId
 ```
 
-Returns the comments payload for one reviewable revision. Non-reviewable pages return `404`. On the Cloudflare Worker, private revisions require a Google session for reads and writes.
+Returns the comments payload for one reviewable revision. Non-reviewable pages return `404`. On the Cloudflare Worker, private revisions require a Google session or OAuth Bearer token unless the page was opened through a signed private view link, which grants its page-scoped comment capability.
 
 The Worker injects a comment button and an isolated review panel when serving reviewable HTML, including previously published revisions. Opening the page refreshes its 14-day capability token. Public review pages do not require Google sign-in. Select text before opening the panel to attach a quotation.
 

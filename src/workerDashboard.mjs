@@ -1,4 +1,5 @@
 import dashboardData from './dashboardData.js';
+import { createViewToken } from './oauthProvider.mjs';
 
 const { extractUnfurl } = dashboardData;
 
@@ -50,9 +51,11 @@ export async function listDashboardDocuments(env, input = {}) {
   `).bind(...search.values, query.limit, cursor).all();
 
   const rows = results || [];
+  const root = trimBaseUrl(env.BASE_URL);
   const items = (await Promise.all(rows.map(async (row) => {
     const meta = row.latest_revision ? await readMeta(env, row.latest_revision) : null;
     if (row.latest_revision && !meta) return null;
+    const url = `${root}/d/${row.slug}/`;
     return {
       docId: row.doc_id,
       slug: row.slug,
@@ -65,6 +68,10 @@ export async function listDashboardDocuments(env, input = {}) {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       private: meta?.private === true,
+      url,
+      viewUrl: meta?.private === true && row.latest_revision
+        ? `${root}/v/${await createViewToken(row.latest_revision, env)}/`
+        : url,
     };
   }))).filter(Boolean);
   return batch(items, { ...query, cursor, total, consumed: rows.length });
@@ -98,15 +105,19 @@ export async function listDashboardPages(env, input = {}) {
   `).bind(...search.values, query.limit, cursor).all();
 
   const rows = results || [];
+  const root = trimBaseUrl(env.BASE_URL);
   const items = (await Promise.all(rows.map(async (row) => {
     const meta = await readMeta(env, row.id);
     if (!meta) return null;
+    const url = `${root}/p/${row.id}/`;
     return {
       id: row.id,
       title: meta?.title || row.title || '(제목 없음)',
       createdAt: meta?.createdAt || row.created_at || row.updated_at,
       private: meta?.private === true,
       reviewable: meta?.reviewable === true,
+      url,
+      viewUrl: meta?.private === true ? `${root}/v/${await createViewToken(row.id, env)}/` : url,
     };
   }))).filter(Boolean);
   return batch(items, { ...query, cursor, total, consumed: rows.length });
@@ -152,6 +163,9 @@ export async function getDashboardDocumentDetail(env, slug, baseUrl) {
     ? await readMeta(env, documentRow.latest_revision)
     : null;
   const url = `${root}/d/${documentRow.slug}/`;
+  const viewUrl = latestMeta?.private === true && documentRow.latest_revision
+    ? `${root}/v/${await createViewToken(documentRow.latest_revision, env)}/`
+    : url;
   const preview = await readHtmlPreview(env, documentRow.latest_revision);
   return {
     kind: 'documents',
@@ -165,6 +179,7 @@ export async function getDashboardDocumentDetail(env, slug, baseUrl) {
     updatedAt: documentRow.updated_at,
     private: latestMeta?.private === true,
     url,
+    viewUrl,
     revisions,
     unfurl: extractUnfurl(preview, { url, fallbackTitle: documentRow.title }),
   };
@@ -229,6 +244,7 @@ export async function getDashboardPageDetail(env, pageId, baseUrl) {
   const meta = await readMeta(env, pageId);
   const root = trimBaseUrl(baseUrl);
   const url = `${root}/p/${pageId}/`;
+  const viewUrl = meta?.private === true ? `${root}/v/${await createViewToken(pageId, env)}/` : url;
   const title = meta?.title || row.title || '(제목 없음)';
   const preview = await readHtmlPreview(env, pageId);
   return {
@@ -239,6 +255,7 @@ export async function getDashboardPageDetail(env, pageId, baseUrl) {
     private: meta?.private === true,
     reviewable: meta?.reviewable === true,
     url,
+    viewUrl,
     unfurl: extractUnfurl(preview, { url, fallbackTitle: title }),
   };
 }
