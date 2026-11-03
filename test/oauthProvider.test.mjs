@@ -210,6 +210,26 @@ test('OAuth discovery, loopback client registration, session authorize, PKCE exc
   database.close();
 });
 
+test('annotation capability tokens cannot authenticate as session cookies', async () => {
+  const { database, bucket, env } = fixture();
+  bucket.putJson('pages/ccc333ccc333.json', { id: 'ccc333ccc333', private: false, reviewable: true });
+
+  const pageResponse = await call(env, '/p/ccc333ccc333/');
+  assert.equal(pageResponse.status, 200);
+  const reviewHtml = await pageResponse.text();
+  const capabilityToken = JSON.parse(reviewHtml.match(/window\.__PAGES_REVIEW__=(.*?);/)[1]).capabilityToken;
+  assert.ok(capabilityToken);
+
+  const dashboardResponse = await call(env, '/api/dashboard/pages', {
+    headers: { Cookie: `pages.session=${capabilityToken}` },
+  });
+  assert.equal(dashboardResponse.status, 302);
+  const loginUrl = new URL(dashboardResponse.headers.get('location'), BASE_URL);
+  assert.equal(loginUrl.pathname, '/auth/google');
+  assert.equal(loginUrl.searchParams.get('returnTo'), '/api/dashboard/pages');
+  database.close();
+});
+
 test('OAuth Bearer protects management routes and provides private pages through signed view links', async () => {
   const { database, bucket, env } = fixture();
   const client = await registerClient(env);
