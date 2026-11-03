@@ -29,6 +29,9 @@ function createDatabase() {
       size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (rev_id, path)
     );
+    CREATE TABLE oauth_used_codes (
+      jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
+    );
   `);
   return database;
 }

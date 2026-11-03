@@ -21,7 +21,12 @@ test('Worker dashboard query normalizes cursor, limit, and search', () => {
 test('Worker dashboard uses D1 cursor search and R2 range unfurl without migrations', async () => {
   const database = createDatabase();
   const bucket = createBucket();
-  const env = { PAGES_DB: d1(database), PAGES_BUCKET: bucket };
+  const env = {
+    PAGES_DB: d1(database),
+    PAGES_BUCKET: bucket,
+    SESSION_SECRET: 'worker-session-secret',
+    BASE_URL: 'https://pages.example.test',
+  };
   seedDatabase(database);
   seedBucket(bucket);
 
@@ -29,6 +34,8 @@ test('Worker dashboard uses D1 cursor search and R2 range unfurl without migrati
   assert.equal(first.total, 3);
   assert.deepEqual(first.items.map((item) => item.slug), ['alpha-doc']);
   assert.equal(first.items[0].private, true);
+  assert.equal(first.items[0].url, 'https://pages.example.test/d/alpha-doc/');
+  assert.match(first.items[0].viewUrl, /^https:\/\/pages\.example\.test\/v\//);
   assert.equal(first.nextCursor, 1);
 
   const second = await listDashboardDocuments(env, { cursor: first.nextCursor, limit: 1, q: '' });
@@ -41,10 +48,12 @@ test('Worker dashboard uses D1 cursor search and R2 range unfurl without migrati
   assert.equal(pages.total, 1);
   assert.equal(pages.items[0].id, 'ccc333ccc333');
   assert.equal(pages.items[0].private, false);
+  assert.equal(pages.items[0].viewUrl, pages.items[0].url);
 
   const document = await getDashboardDocumentDetail(env, 'alpha-doc', 'https://pages.example.test');
   assert.equal(document.kind, 'documents');
   assert.equal(document.private, true);
+  assert.match(document.viewUrl, /^https:\/\/pages\.example\.test\/v\//);
   assert.equal(document.unfurl.title, 'Alpha OG');
   assert.equal(document.unfurl.image, 'https://pages.example.test/d/alpha-doc/card.png');
   assert.deepEqual(document.revisions.map((revision) => revision.commentCount), [2, 0]);
@@ -387,12 +396,12 @@ test('review UI reaches old and bundled revisions, refreshes tokens, and appends
   assert.doesNotMatch(plain,/attachShadow/);
   bucket.putJson('pages/aaa111aaa111.json', { id:'aaa111aaa111',reviewable:true,private:true });
   assert.equal((await call(endpoint)).status,401);
-  assert.equal((await post({id:'private',comment:'no'})).status,401);
+  assert.equal((await post({id:'private',comment:'no'})).status,201);
   assert.equal((await call('/p/aaa111aaa111/')).status,302);
   const cookie = `pages.session=${signSession({email:'tester@example.com',exp:Math.floor(Date.now()/1000)+60},env.SESSION_SECRET)}`;
   assert.equal((await post({id:'private-ok',comment:'Authenticated'}, {headers:{...headers,cookie}})).status,201);
   assert.equal((await call(endpoint,{headers:{cookie}})).status,200);
-  assert.equal((await call(endpoint,{method:'PUT',headers,body:JSON.stringify({comments:[]})})).status,401);
+  assert.equal((await call(endpoint,{method:'PUT',headers,body:JSON.stringify({comments:[]})})).status,200);
   const expiredPayload = Buffer.from(JSON.stringify({typ:'pages.annotation',rev_id:'aaa111aaa111',exp:1})).toString('base64url');
   const expired = `${expiredPayload}.${createHmac('sha256',env.SESSION_SECRET).update(expiredPayload).digest('base64url')}`;
   assert.equal((await post({id:'expired',comment:'No'}, {headers:{...headers,cookie,[config.tokenHeader]:expired}})).status,401);

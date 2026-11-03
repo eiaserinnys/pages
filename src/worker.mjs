@@ -1,6 +1,15 @@
 import { reviewClientSource } from './reviewClient.mjs';
 import dashboardModule from './dashboard.js';
 import { createVtuberLiveSession } from './vtuberLive.mjs';
+import { hmacBase64Url, base64UrlDecode, base64UrlEncode, safeEqual, textDecode, textEncode } from './signedTokens.mjs';
+import {
+  authorizeOAuthClient,
+  exchangeOAuthToken,
+  oauthDiscovery,
+  registerOAuthClient,
+  verifyOAuthAccessToken,
+  verifyViewToken,
+} from './oauthProvider.mjs';
 import {
   dashboardQuery as readDashboardQuery,
   deleteDashboardPageData,
@@ -118,6 +127,13 @@ async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
+  if (request.method === "GET" && pathname === "/.well-known/oauth-authorization-server") return oauthDiscovery(env);
+  if (request.method === "POST" && pathname === "/auth/oauth/register") return registerOAuthClient(request, env);
+  if (request.method === "GET" && pathname === "/auth/oauth/authorize") {
+    return authorizeOAuthClient(request, env, getSession);
+  }
+  if (request.method === "POST" && pathname === "/auth/oauth/token") return exchangeOAuthToken(request, env);
+
   if (request.method === 'POST' && pathname === '/api/vtuber-live/session') {
     return createVtuberLiveSession(request, env, await getSession(request, env));
   }
@@ -130,6 +146,8 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && pathname === "/api/pages") return uploadPage(request, env);
+
+  if (request.method === "GET" && pathname.startsWith("/v/")) return serveViewRoute(request, env);
 
   if (request.method === "GET" && pathname === "/api/dashboard/documents") {
     const auth = await requireAuth(request, env);
@@ -464,6 +482,28 @@ async function maybeServePageRoute(request, env) {
   return sendPageAsset(request, env, pageId, assetPathRaw || "");
 }
 
+async function serveViewRoute(request, env) {
+  const url = new URL(request.url);
+  const match = url.pathname.match(/^\/v\/([^/]+)(?:\/(.*))?$/);
+  if (!match) return withPrivateViewHeaders(notFound());
+  const [, token, assetPath] = match;
+  const view = await verifyViewToken(token, env);
+  if (!view) return withPrivateViewHeaders(notFound());
+  if (view.expired) {
+    return withPrivateViewHeaders(html("<h1>열람 링크가 만료되었습니다</h1><p>새 열람 링크로 다시 여십시오.</p>", 410));
+  }
+  if (assetPath === undefined) return withPrivateViewHeaders(redirect(`/v/${token}/${url.search}`));
+  return withPrivateViewHeaders(await sendPageAsset(request, env, view.rev, assetPath, true));
+}
+
+function withPrivateViewHeaders(response) {
+  const headers = new Headers(response.headers);
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("X-Robots-Tag", "noindex");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 async function maybeServeDocumentRoute(request, env) {
   const url = new URL(request.url);
   const revisionAsset = url.pathname.match(/^\/d\/([^/]+)\/r\/([0-9]+)(?:\/(.*))?$/);
@@ -490,10 +530,10 @@ async function maybeServeDocumentRoute(request, env) {
   return sendPageAsset(request, env, documentRecord.revision.revId, latestAsset[2] || "");
 }
 
-async function sendPageAsset(request, env, pageId, assetPath = "") {
+async function sendPageAsset(request, env, pageId, assetPath = "", skipPrivateAuth = false) {
   const meta = await readMeta(env, pageId);
   if (!meta) return notFound();
-  if (meta.private) {
+  if (meta.private && !skipPrivateAuth) {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
   }
@@ -597,8 +637,11 @@ async function annotationAccess(request, env, revId, write = false) {
   const meta = await readMeta(env, revId);
   if (!meta || meta.reviewable !== true) return { response: json({ error: "Not found" }, 404) };
   if (meta.private) {
-    const auth = await requireAuth(request, env, { json: true });
-    if (auth.response) return auth;
+    const capability = await verifyAnnotationToken(readAnnotationToken(request), { revId, secret: env.SESSION_SECRET });
+    if (!capability.ok) {
+      const auth = await requireAuth(request, env, { json: true });
+      if (auth.response) return auth;
+    }
   }
   if (write) {
     const result = await verifyAnnotationToken(readAnnotationToken(request), { revId, secret: env.SESSION_SECRET });
@@ -1443,6 +1486,15 @@ function logout() {
 }
 
 async function requireAuth(request, env, options = {}) {
+  const authorization = request.headers.get("Authorization") || "";
+  const bearer = authorization.match(/^Bearer(?:\s+(.*))?$/i);
+  if (bearer) {
+    const session = await verifyOAuthAccessToken((bearer[1] || "").trim(), env);
+    if (session) return { session };
+    const response = json({ error: "invalid_token" }, 401);
+    response.headers.set("WWW-Authenticate", 'Bearer error="invalid_token"');
+    return { response };
+  }
   const session = await getSession(request, env);
   if (session) return { session };
   if (options.json) return { response: json({ error: "Unauthorized" }, 401) };
@@ -1464,6 +1516,7 @@ async function getSession(request, env) {
   } catch {
     return null;
   }
+  if (payload.typ !== undefined) return null;
   if (!Number.isInteger(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) return null;
   return payload;
 }
@@ -2454,14 +2507,6 @@ function httpError(message, statusCode = 400) {
   return err;
 }
 
-function textEncode(value) {
-  return new TextEncoder().encode(value);
-}
-
-function textDecode(value) {
-  return new TextDecoder().decode(value);
-}
-
 function base64Encode(bytes) {
   let binary = "";
   const chunkSize = 0x8000;
@@ -2476,19 +2521,6 @@ function base64Decode(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes;
-}
-
-function base64UrlEncode(bytes) {
-  return base64Encode(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64UrlDecode(value) {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  return base64Decode(padded);
-}
-
-async function hmacBase64Url(body, secret) {
-  return base64UrlEncode(await hmacBytes(body, secret));
 }
 
 async function hmacHex(body, secret) {
@@ -2506,11 +2538,4 @@ async function sha256Hex(value) {
 
 function bytesToHex(bytes) {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function safeEqual(left, right) {
-  if (typeof left !== "string" || typeof right !== "string" || left.length !== right.length) return false;
-  let diff = 0;
-  for (let i = 0; i < left.length; i += 1) diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
-  return diff === 0;
 }
