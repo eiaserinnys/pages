@@ -65,7 +65,7 @@ test('reviewPaths attaches the review client only to selected bundle HTML', { ti
   });
   assert.equal(response.status, 201);
   const result = await response.json();
-  assert.deepEqual(Object.keys(result).sort(), ['id', 'review', 'url']);
+  assert.deepEqual(Object.keys(result).sort(), ['id', 'private', 'review', 'url']);
 
   const metaObject = await bucket.get(`pages/${result.id}.json`);
   const meta = JSON.parse(await metaObject.text());

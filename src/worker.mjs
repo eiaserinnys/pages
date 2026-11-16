@@ -323,7 +323,13 @@ async function uploadPage(request, env) {
   }
 
   let documentRecord;
+  let isPrivate = body.private === true;
   try {
+    if (body.doc && typeof body.private !== "boolean") {
+      const existingDocument = await getDocument(env, body.doc);
+      const latestMeta = existingDocument?.latestRevision ? await readMeta(env, existingDocument.latestRevision) : null;
+      isPrivate = latestMeta?.private === true;
+    }
     documentRecord = body.doc ? await appendRevision(env, {
       slug: body.doc,
       revId: id,
@@ -360,7 +366,7 @@ async function uploadPage(request, env) {
     id,
     title,
     createdAt,
-    isPrivate: body.private === true,
+    isPrivate,
     documentRecord,
     review,
     reviewPaths,
@@ -374,7 +380,7 @@ async function uploadPage(request, env) {
     httpMetadata: { contentType: entrypointFile.contentType },
   });
 
-  return json(buildUploadResponse({ id, baseUrl: env.BASE_URL, documentRecord, review }), 201);
+  return json(buildUploadResponse({ id, baseUrl: env.BASE_URL, documentRecord, review, isPrivate }), 201);
 }
 
 function validateUploadOptions({ reviewable, webhookUrl, webhookSecret, doc, owner }) {
@@ -460,8 +466,8 @@ function buildPageMeta({ id, title, createdAt, isPrivate, documentRecord, review
   return meta;
 }
 
-function buildUploadResponse({ id, baseUrl, documentRecord, review }) {
-  const response = { id, url: `${baseUrl}/p/${id}` };
+function buildUploadResponse({ id, baseUrl, documentRecord, review, isPrivate }) {
+  const response = { id, url: `${baseUrl}/p/${id}`, private: isPrivate };
   if (documentRecord?.slug) {
     response.docId = documentRecord.docId;
     response.revId = id;
