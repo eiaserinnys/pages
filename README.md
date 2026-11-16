@@ -2,7 +2,7 @@
 
 A lightweight HTML page hosting service running as a Cloudflare Worker. Clients upload HTML or multifile bundles through a Bearer-token-authenticated API and receive a stable page URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
 
-![Dashboard](pages.jpg)
+![Dashboard](docs/dashboard.png)
 
 ## Features
 
@@ -305,6 +305,8 @@ npm run worker:dry-run
 ```
 
 `npm test` runs the Node test suite; `worker:check` syntax-checks every Worker module; `worker:dry-run` bundles the Worker with Wrangler without deploying.
+
+`node scripts/capture-dashboard.mjs docs/dashboard.png` regenerates the README dashboard screenshot from the local Worker with fabricated sample data; it needs the Playwright Chromium install.
 
 The `main` branch deploys to Cloudflare Workers through `.github/workflows/cloudflare-worker.yml`. A push that touches the workflow, the Worker sources, `wrangler.toml`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build, and the review-browser test against the built Worker before deploying with `wrangler@4.86.0`. Pull requests run the same checks but never deploy.
 
