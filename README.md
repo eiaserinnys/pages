@@ -1,38 +1,49 @@
 # pages
 
-A lightweight HTML page hosting service. Clients upload HTML via a Bearer-token-authenticated API and receive a unique public URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
+A lightweight HTML page hosting service running as a Cloudflare Worker. Clients upload HTML or multifile bundles through a Bearer-token-authenticated API and receive a stable page URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
 
 ![Dashboard](pages.jpg)
 
 ## Features
 
-- **HTML upload** — POST any HTML string and get back a stable `/p/:id` URL
-- **Document revisions** — opt-in `/d/:slug` stable URLs keep a revision history without changing anonymous uploads
+- **HTML upload** — POST an HTML string or a multifile bundle and get back a `/p/:id` page URL
+- **Document revisions** — opt-in `/d/:slug` stable URLs keep an immutable revision history without changing anonymous uploads
 - **Multifile bundles** — opt-in manifest upload serves `index.html` plus relative assets under `/p/:id/...` and `/d/:slug/...`
-- **Review annotations** — opt-in reviewable pages receive rev-scoped comment storage
-- **Public / private toggle** — pages default to public; flip visibility from the dashboard
+- **Review annotations** — opt-in reviewable pages receive rev-scoped comment storage and capability tokens
+- **Private pages** — a page is public unless it is uploaded with `private: true`; re-publishing into an existing document follows that document's latest revision visibility, and the dashboard can flip visibility at any time
 - **Google OAuth dashboard** — only allowlisted Google accounts can access `/` and manage pages
 - **Bearer token auth** — API writes require `Authorization: Bearer <token>`
-- **Bundle limits** — uploads are capped at 200 files and 50 MB per bundle
+- **Bundle limits** — uploads are capped at 200 files and 50 MB per bundle; request bodies are capped at 75 MB
 
-## Environment Variables
+## Cloudflare resources
 
-Create a `.env` file in the project root (see `.env.example` if present):
+- D1 database: `pages` (`af7049be-6ba5-4261-bc05-e5773d3eec33`), bound as `PAGES_DB`
+- Private R2 bucket: `pages-content`, bound as `PAGES_BUCKET`; uploaded HTML and bundle files are stored here so private pages are not exposed through a public R2 URL
+- Custom domain route: `pages.eiaserinnys.me` in zone `eiaserinnys.me`, configured in `wrangler.toml`; `workers_dev = true` also keeps the workers.dev URL
 
-| Variable              | Description                                                    |
-|-----------------------|----------------------------------------------------------------|
-| `PORT`                | Port the server listens on (e.g. `3110`)                       |
-| `PAGES_DIR`           | Absolute path to the directory where pages are stored          |
-| `PAGES_API_TOKEN`     | Secret token required for `POST /api/pages`                    |
-| `SESSION_SECRET`      | Secret used to sign the session cookie                         |
-| `BASE_URL`            | Public base URL without trailing slash (e.g. `https://pages.example.com`) |
-| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 client ID                                     |
-| `GOOGLE_CLIENT_SECRET`| Google OAuth 2.0 client secret                                 |
-| `ALLOWED_EMAILS`      | Comma-separated list of Google email addresses allowed to log in |
+## Configuration
 
-All variables are required. The server throws an error on startup if any are missing.
+The Worker reads secrets, plain variables, and bindings. Every request fails with `500` if `PAGES_BUCKET`, `PAGES_DB`, `PAGES_API_TOKEN`, `SESSION_SECRET`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, or `ALLOWED_EMAILS` is missing.
 
-The annotation metadata database is stored as `pages-meta.sqlite` inside `PAGES_DIR`.
+Required secrets:
+
+```bash
+npx --yes wrangler@4.86.0 secret put PAGES_API_TOKEN
+npx --yes wrangler@4.86.0 secret put SESSION_SECRET
+npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_ID
+npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
+```
+
+Non-secret variables and bindings live in `wrangler.toml`:
+
+| Setting          | Kind       | Description                                                                         |
+|------------------|------------|-------------------------------------------------------------------------------------|
+| `BASE_URL`       | var        | Public base URL without a trailing slash                                            |
+| `ALLOWED_EMAILS` | var        | Comma-separated Google accounts allowed to sign in                                  |
+| `PAGES_DB`       | D1 binding | Metadata for documents, revisions, bundle assets, annotations, and webhook secrets  |
+| `PAGES_BUCKET`   | R2 binding | Page metadata, entrypoint HTML, and bundle assets                                   |
+
+The private VTuber voice demo additionally needs a `VTUBER_OPENAI_API_KEY` secret for `POST /api/vtuber-live/session`; without it the endpoint answers `503`. See `docs/vtuber-live.md`.
 
 ## API
 
@@ -45,64 +56,72 @@ Content-Type: application/json
 
 {
   "html": "<html>...</html>",
-  "title": "My Report",      // optional, defaults to "(제목 없음)"
-  "doc": "my-report",        // optional, opt-in stable document slug
-  "private": false,          // optional, defaults to false
-  "reviewable": false,       // optional, defaults to false
-  "reviewPaths": ["frame.html"], // optional, requires reviewable=true; omit to attach review UI to all HTML files
+  "title": "My Report",          // optional, defaults to "(제목 없음)"
+  "owner": "api",                // optional document owner, defaults to "api"
+  "doc": "my-report",            // optional, opt-in stable document slug
+  "private": false,              // optional boolean; omitted means public or inherited (see below)
+  "reviewable": true,            // optional boolean; enables review annotations
+  "reviewPaths": ["index.html"], // optional, requires reviewable=true; omit to attach the review UI to all HTML files
   "webhookUrl": "https://example.com/hook", // optional, requires reviewable=true
   "webhookSecret": "<signing secret>"       // optional, requires webhookUrl
 }
 ```
 
-**Response `201`**
+The upload endpoint accepts a JSON body only; it does not accept `multipart/form-data`. Send either `html` (one HTML string) or `files` with an `entrypoint` (a multifile bundle), never both. Request bodies above 75 MB are rejected with `413`.
+
+`private` is optional. When it is a boolean, that value is stored. When it is omitted, an upload without `doc`, and a first upload to a new `doc`, is public; a re-upload to an existing `doc` follows the latest revision visibility of that document.
+
+**Response `201`** — the response always includes the page id, its URL, and the resolved visibility:
 
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "url": "https://pages.example.com/p/a1b2c3d4e5f6"
+  "url": "https://pages.eiaserinnys.me/p/a1b2c3d4e5f6",
+  "private": false
 }
 ```
 
-If `reviewable` is `true`, the response also includes a rev-scoped capability token and the stored HTML receives an inline `window.__PAGES_REVIEW__` config:
+If `doc` is present, the same response adds the document fields:
+
+```json
+{
+  "id": "b2c3d4e5f6a7",
+  "url": "https://pages.eiaserinnys.me/p/b2c3d4e5f6a7",
+  "private": false,
+  "docId": "doc_123abc456def",
+  "revId": "b2c3d4e5f6a7",
+  "revNumber": 2,
+  "stableUrl": "https://pages.eiaserinnys.me/d/my-report",
+  "revisionUrl": "https://pages.eiaserinnys.me/d/my-report/r/2"
+}
+```
+
+`doc` is opt-in. If it is omitted, the backend records an internal anonymous one-revision document and the response has no document fields. Slugs must match `^[a-z0-9][a-z0-9_-]{2,63}$`; reserved names `api`, `auth`, `d`, `dashboard`, `login`, `logout`, `p`, and `static` are rejected.
+
+If `reviewable` is `true`, the response also includes a rev-scoped capability token and the served HTML receives an inline `window.__PAGES_REVIEW__` config:
 
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "url": "https://pages.example.com/p/a1b2c3d4e5f6",
+  "url": "https://pages.eiaserinnys.me/p/a1b2c3d4e5f6",
+  "private": false,
   "review": {
     "revId": "a1b2c3d4e5f6",
     "annotationsUrl": "/api/annotations/a1b2c3d4e5f6",
     "tokenHeader": "X-Pages-Annotation-Token",
     "capabilityToken": "<rev-scoped-token>",
-    "expiresAt": "2026-06-29T00:00:00.000Z",
-    "webhook": {
-      "enabled": true,
-      "signed": true
-    }
+    "expiresAt": "2026-06-29T00:00:00.000Z"
   }
 }
 ```
 
-If `doc` is present, the page is appended as a new immutable revision under that document slug. The response keeps the existing `id` and `url` fields and adds document fields:
+When `webhookUrl` is configured, `review` also carries `webhook: { "enabled": true, "signed": <boolean> }`, where `signed` is true when `webhookSecret` was supplied.
 
-```json
-{
-  "id": "b2c3d4e5f6a7",
-  "url": "https://pages.example.com/p/b2c3d4e5f6a7",
-  "docId": "doc_123abc456def",
-  "revId": "b2c3d4e5f6a7",
-  "revNumber": 2,
-  "stableUrl": "https://pages.example.com/d/my-report",
-  "revisionUrl": "https://pages.example.com/d/my-report/r/2"
-}
-```
+`webhookUrl` and `webhookSecret` are accepted only for reviewable pages, and `webhookSecret` requires `webhookUrl`. `webhookUrl` must be an absolute `http`/`https` URL. Page metadata stores `review.webhookUrl` and, when signing is enabled, `review.webhookSecretHash`; the raw signing secret is kept in the D1 `webhook_secrets` table, not in the page JSON metadata or injected HTML.
 
-`doc` is opt-in. If it is omitted, the response shape is unchanged and the backend only records an internal anonymous one-revision document. Slugs must match `^[a-z0-9][a-z0-9_-]{2,63}$`; reserved route names such as `p`, `d`, `api`, and `auth` are rejected.
+`reviewPaths` is accepted only together with `reviewable: true`. Each entry must be a bundle path that exists and holds HTML; when omitted, the review UI is attached to every HTML asset in the bundle.
 
-`webhookUrl` and `webhookSecret` are accepted only for reviewable pages. Page metadata stores `review.webhookUrl` and, when signing is enabled, `review.webhookSecretHash`; the raw signing secret is kept in the SQLite metadata store, not in the page JSON metadata or injected HTML.
-
-For multifile bundles, send `files` instead of `html`. Each file is base64 encoded and addressed by a safe relative POSIX path. The single HTML upload above is treated internally as a one-file bundle with `index.html`, but its response remains exactly `{ id, url }` unless optional features such as `doc` or `reviewable` are requested.
+For multifile bundles, send `files` instead of `html`. Each file is base64 encoded and addressed by a safe relative POSIX path. The single HTML upload above is treated internally as a one-file bundle with `index.html`.
 
 ```json
 {
@@ -125,7 +144,7 @@ For multifile bundles, send `files` instead of `html`. Each file is base64 encod
 }
 ```
 
-Bundle paths reject traversal and ambiguous platform paths: `..`, absolute paths, backslashes, NULL bytes, empty segments, and Windows reserved names such as `CON` and `NUL`. Server limits are 200 files and 50 MB total bytes per bundle.
+Each file needs `path` and base64 `content`; `encoding`, when present, must be `base64`, and `contentType` falls back to inference from the file extension. The `entrypoint` must exist in the bundle. Bundle paths reject traversal and ambiguous platform paths: `..`, absolute paths, backslashes, NULL bytes, empty segments, and Windows reserved names such as `CON` and `NUL`. Server limits are 200 files and 50 MB total bytes per bundle; the request body limit is 75 MB.
 
 ### Document revisions
 
@@ -147,7 +166,7 @@ Serves that fixed revision's HTML. Revision URLs do not move when newer revision
 
 The Worker exposes OAuth metadata at `/.well-known/oauth-authorization-server`, dynamic client registration at `POST /auth/oauth/register`, authorization code with PKCE S256 at `GET /auth/oauth/authorize`, and token exchange or refresh at `POST /auth/oauth/token`. Register loopback HTTP redirect URIs. Google sign-in and `ALLOWED_EMAILS` authorize access. Access tokens expire after one hour; refresh tokens expire after 30 days.
 
-OAuth Bearer access is accepted by `GET /api/dashboard/documents`, `GET /api/dashboard/pages`, their detail routes, document and page visibility `PATCH` routes, and `DELETE /api/pages/:id`. The upload endpoint continues to use `PAGES_API_TOKEN`. Authenticated list and detail responses include `url` and `viewUrl`; public items use the public URL for both, while private items receive a signed seven-day `/v/:token/` link that opens the page and its relative assets without a session cookie.
+OAuth Bearer access is accepted by `GET /api/dashboard/documents`, `GET /api/dashboard/pages`, their detail routes, document visibility at `PATCH /api/dashboard/documents/:slug/visibility`, page visibility at `PATCH /api/pages/:id/visibility`, and `DELETE /api/pages/:id`. The upload endpoint continues to use `PAGES_API_TOKEN`. Authenticated list and detail responses include `url` and `viewUrl`; public items use the public URL for both, while private items receive a signed seven-day `/v/:token/` link that opens the page and its relative assets without a session cookie.
 
 ```
 GET /p/:pageId/:path
@@ -170,7 +189,7 @@ Returns document metadata and revisions in newest-first order:
   "title": "My Report",
   "owner": "api",
   "latestRevision": "b2c3d4e5f6a7",
-  "stableUrl": "https://pages.example.com/d/my-report",
+  "stableUrl": "https://pages.eiaserinnys.me/d/my-report",
   "createdAt": "2026-06-15T00:00:00.000Z",
   "updatedAt": "2026-06-15T01:00:00.000Z",
   "revisions": [
@@ -179,8 +198,8 @@ Returns document metadata and revisions in newest-first order:
       "revNumber": 2,
       "status": "published",
       "createdAt": "2026-06-15T01:00:00.000Z",
-      "pageUrl": "https://pages.example.com/p/b2c3d4e5f6a7",
-      "revisionUrl": "https://pages.example.com/d/my-report/r/2"
+      "pageUrl": "https://pages.eiaserinnys.me/p/b2c3d4e5f6a7",
+      "revisionUrl": "https://pages.eiaserinnys.me/d/my-report/r/2"
     }
   ]
 }
@@ -198,7 +217,7 @@ Returns the comments payload for one reviewable revision. Non-reviewable pages r
 
 The Worker injects a comment button and an isolated review panel when serving reviewable HTML, including previously published revisions. Opening the page refreshes its 14-day capability token. Public review pages do not require Google sign-in. Select text before opening the panel to attach a quotation.
 
-The review panel uses `POST /api/annotations/:revId` with the capability header and `{ "id": "client-generated-unique-id", "comment": "Text", "author": "Optional name", "selected_text": "Optional quote" }`. This appends one comment without replacing existing comments. Identical retries with the same ID succeed without duplication; conflicting ID reuse returns `409`. The legacy Express server does not provide this UI or append endpoint.
+The review panel uses `POST /api/annotations/:revId` with the capability header and `{ "id": "client-generated-unique-id", "comment": "Text", "author": "Optional name", "selected_text": "Optional quote" }`. This appends one comment without replacing existing comments. Identical retries with the same ID succeed without duplication; conflicting ID reuse returns `409`.
 
 ```
 PUT /api/annotations/:revId
@@ -214,7 +233,7 @@ Content-Type: application/json
 
 `PUT` replaces the full comment set for the revision. The capability token is scoped to the single `revId` and expires automatically.
 
-If the page has `review.webhookUrl`, a successful `PUT` queues a fire-and-forget webhook POST:
+If the page has `review.webhookUrl`, a successful annotation write queues a fire-and-forget webhook POST:
 
 ```json
 {
@@ -233,78 +252,81 @@ When a webhook secret is configured, the request includes:
 X-Pages-Webhook-Signature: sha256=<hex hmac over the exact JSON body>
 ```
 
-Webhook delivery has a 5 second timeout, logs failures to stderr, and does not retry. Delivery failure does not change the `PUT` response.
+Webhook delivery has a 5 second timeout, logs failures to stderr, and does not retry. Delivery failure does not change the annotation response.
 
 ### Other endpoints
 
-| Method   | Path                             | Auth          | Description            |
-|----------|----------------------------------|---------------|------------------------|
-| `GET`    | `/p/:pageId`                     | none (public) | Serve the page         |
-| `GET`    | `/p/:pageId/:path`               | none (public) | Serve page bundle asset |
-| `GET`    | `/d/:slug`                       | none (public) | Serve latest revision at the stable URL |
-| `GET`    | `/d/:slug/:path`                 | none (public) | Serve latest revision bundle asset |
-| `GET`    | `/d/:slug/r/:revNumber`          | none (public) | Serve a fixed revision |
-| `GET`    | `/d/:slug/r/:revNumber/:path`    | none (public) | Serve fixed revision bundle asset |
-| `GET`    | `/api/documents/:slug`           | none          | Show document metadata |
-| `GET`    | `/api/annotations/:revId`        | none          | List review comments   |
-| `PUT`    | `/api/annotations/:revId`        | capability    | Replace review comments |
-| `PATCH`  | `/api/pages/:pageId/visibility`  | Google OAuth  | Toggle public/private  |
-| `DELETE` | `/api/pages/:pageId`             | Google OAuth  | Delete a page          |
-| `GET`    | `/`                              | Google OAuth  | Admin dashboard        |
+Private pages and documents require a Google OAuth session or OAuth Bearer token unless they are opened through a signed `/v/:token/` link. Annotation writes always require the rev-scoped capability token.
 
-## Running
+| Method   | Path                                             | Auth                                 | Description                                    |
+|----------|--------------------------------------------------|--------------------------------------|------------------------------------------------|
+| `GET`    | `/.well-known/oauth-authorization-server`        | none                                 | OAuth authorization server metadata            |
+| `POST`   | `/auth/oauth/register`                           | none                                 | Dynamic client registration                    |
+| `GET`    | `/auth/oauth/authorize`                          | Google sign-in                       | Authorization code endpoint (PKCE S256)        |
+| `POST`   | `/auth/oauth/token`                              | none                                 | Code exchange and refresh                      |
+| `GET`    | `/auth/google`                                   | none                                 | Start Google OAuth sign-in                     |
+| `GET`    | `/auth/google/callback`                          | none                                 | Google OAuth callback                          |
+| `GET`    | `/auth/logout`                                   | none                                 | Clear the session                              |
+| `GET`    | `/auth/error`                                    | none                                 | Forbidden sign-in result                       |
+| `POST`   | `/api/pages`                                     | Bearer `PAGES_API_TOKEN`             | Upload a page                                  |
+| `GET`    | `/v/:token`                                      | signed view token                    | Redirect to `/v/:token/`                       |
+| `GET`    | `/v/:token/:path`                                | signed view token                    | Serve a private page without a session cookie  |
+| `GET`    | `/p/:pageId`                                     | public / private auth                | Redirect to `/p/:pageId/`                      |
+| `GET`    | `/p/:pageId/:path`                               | public / private auth                | Serve the page or a bundle asset               |
+| `GET`    | `/d/:slug`                                       | public / private auth                | Redirect to `/d/:slug/`                        |
+| `GET`    | `/d/:slug/:path`                                 | public / private auth                | Serve the latest revision or bundle asset      |
+| `GET`    | `/d/:slug/r/:revNumber`                          | public / private auth                | Redirect to `/d/:slug/r/:revNumber/`           |
+| `GET`    | `/d/:slug/r/:revNumber/:path`                    | public / private auth                | Serve a fixed revision or bundle asset         |
+| `GET`    | `/api/documents/:slug`                           | none / private auth                  | Document metadata and revisions                |
+| `GET`    | `/api/annotations/:revId`                        | none (public); capability or OAuth (private) | List review comments                   |
+| `POST`   | `/api/annotations/:revId`                        | capability                           | Append one review comment                      |
+| `PUT`    | `/api/annotations/:revId`                        | capability                           | Replace the review comment set                 |
+| `POST`   | `/api/annotations/:revId/:commentId/replies`     | capability                           | Append a reply to a comment                    |
+| `GET`    | `/api/dashboard/documents`                       | Google OAuth                         | List documents (paginated)                     |
+| `GET`    | `/api/dashboard/documents/:slug`                 | Google OAuth                         | Document detail                                |
+| `PATCH`  | `/api/dashboard/documents/:slug/visibility`      | Google OAuth                         | Set visibility for every revision of a document |
+| `GET`    | `/api/dashboard/pages`                           | Google OAuth                         | List standalone pages (paginated)              |
+| `GET`    | `/api/dashboard/pages/:pageId`                   | Google OAuth                         | Page detail                                    |
+| `PATCH`  | `/api/pages/:id/visibility`                      | Google OAuth                         | Set page visibility (`{ "private": boolean }`) |
+| `DELETE` | `/api/pages/:id`                                 | Google OAuth                         | Delete a page and its bundle                   |
+| `POST`   | `/api/vtuber-live/session`                       | Google session                       | Start a WebRTC voice session for the private VTuber demo |
+| `GET`    | `/`, `/dashboard`                                | Google OAuth                         | Admin dashboard                                |
+| `GET`    | `/dashboard/documents/:slug`                     | Google OAuth                         | Document detail page                           |
+
+## Running and deployment
+
+Local checks:
 
 ```bash
 npm install
-node src/server.js
+npm test
+npm run worker:check
+npm run worker:dry-run
 ```
 
-With pm2 (production):
+`npm test` runs the Node test suite; `worker:check` syntax-checks every Worker module; `worker:dry-run` bundles the Worker with Wrangler without deploying.
 
-```bash
-pm2 start ecosystem.config.js
-```
+The `main` branch deploys to Cloudflare Workers through `.github/workflows/cloudflare-worker.yml`. A push that touches the workflow, the Worker sources, `wrangler.toml`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build, and the review-browser test against the built Worker before deploying with `wrangler@4.86.0`. Pull requests run the same checks but never deploy.
 
-The `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system. Do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
+A push that changes `migrations/**` stops the automatic deploy; run the workflow manually with `apply_d1_migrations=true` to apply D1 migrations before deploying.
 
-## Cloudflare Worker Backend
+## Legacy Express server (not deployed)
 
-The repository includes a staged Cloudflare Worker implementation in `src/worker.mjs`. It is not wired to `pages.eiaserinnys.me` by default.
+The repository still contains the earlier Express implementation in `src/server.js`, with its dependencies in `package.json`. It is not deployed; `pages.eiaserinnys.me` is served by the Worker.
 
-Cloudflare resources:
+The Express server ran with `npm start` (`node src/server.js`) or `pm2 start ecosystem.config.js`. `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system; do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
 
-- D1 database: `pages` (`af7049be-6ba5-4261-bc05-e5773d3eec33`)
-- Private R2 bucket: `pages-content`
-- Existing public R2 bucket for externally shareable assets: `pages-assets`
+It required the following environment variables:
 
-The Worker keeps uploaded page HTML and bundle files in the private `pages-content` bucket so private pages are not exposed through a public R2 URL. D1 replaces the current `pages-meta.sqlite` metadata store for documents, revisions, annotations, webhook secrets, and revision asset manifests.
+| Variable              | Description                                                    |
+|-----------------------|----------------------------------------------------------------|
+| `PORT`                | Port the server listens on (e.g. `3110`)                       |
+| `PAGES_DIR`           | Absolute path to the directory where pages are stored          |
+| `PAGES_API_TOKEN`     | Secret token required for `POST /api/pages`                    |
+| `SESSION_SECRET`      | Secret used to sign the session cookie                         |
+| `BASE_URL`            | Public base URL without trailing slash                         |
+| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 client ID                                     |
+| `GOOGLE_CLIENT_SECRET`| Google OAuth 2.0 client secret                                 |
+| `ALLOWED_EMAILS`      | Comma-separated list of Google email addresses allowed to log in |
 
-Required Worker secrets:
-
-```bash
-npx --yes wrangler@4.86.0 secret put PAGES_API_TOKEN
-npx --yes wrangler@4.86.0 secret put SESSION_SECRET
-npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_ID
-npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
-```
-
-Non-secret Worker variables and bindings live in `wrangler.toml`. The custom-domain route is intentionally commented out until migration and smoke testing are complete.
-
-The `main` branch is deployed to Cloudflare Worker by `.github/workflows/cloudflare-worker.yml` after tests and `worker:dry-run` pass. Push deployments intentionally stop when `migrations/**` changed; run the workflow manually with `apply_d1_migrations=true` for schema changes.
-
-Suggested cutover sequence:
-
-1. Set Worker secrets with `npm run worker:set-secrets -- --source-env /home/eias/services/pages/shared/.env`.
-2. Apply D1 migrations with `npm run worker:migrate:d1`.
-3. Copy the current Express data from `PAGES_DIR` into D1 and the `pages-content` R2 bucket:
-
-```bash
-npm run worker:migrate:data -- \
-  --source-dir /home/eias/services/pages/shared/pages \
-  --apply-schema
-```
-
-The data migration script uploads `pages-content` objects through `wrangler r2 object put` by default, so it uses `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. Pass `--r2-method s3` only when a dedicated R2 S3 access key is available.
-
-4. Deploy the Worker to the workers.dev staging URL and smoke test uploads, public pages, private-page OAuth, document revisions, bundle assets, review annotations, and webhooks.
-5. Uncomment the `pages.eiaserinnys.me` route in `wrangler.toml` and deploy during an approved cutover window.
+All of them were required; the server threw on startup when one was missing. Annotation metadata was stored as `pages-meta.sqlite` inside `PAGES_DIR`. The legacy server does not provide the review panel or the annotation append and reply endpoints. The one-time migration helpers remain in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).
