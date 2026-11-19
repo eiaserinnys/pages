@@ -55,6 +55,9 @@ const PUBLISHED_STATUS = "published";
 const DASHBOARD_DEFAULT_PAGE_SIZE = 25;
 const DASHBOARD_MAX_PAGE_SIZE = 100;
 const DASHBOARD_ROW_HEIGHT = 96;
+const CHANGE_EVENT_STREAM_NAME = "pages";
+const CHANGE_EVENT_KEEPALIVE_MS = 30 * 1000;
+const CHANGE_EVENT_TYPES = new Set(["document_updated", "page_updated"]);
 const WINDOWS_RESERVED_NAMES = new Set([
   "CON",
   "PRN",
@@ -116,6 +119,7 @@ export default {
 };
 
 function withoutBody(response) {
+  response.body?.cancel().catch(() => {});
   return new Response(null, {
     status: response.status,
     statusText: response.statusText,
@@ -145,7 +149,7 @@ async function routeRequest(request, env, ctx) {
     return html("<h1>403 Forbidden</h1><p>Access denied. Your Google account is not authorized.</p>", 403);
   }
 
-  if (request.method === "POST" && pathname === "/api/pages") return uploadPage(request, env);
+  if (request.method === "POST" && pathname === "/api/pages") return uploadPage(request, env, ctx);
 
   if (request.method === "GET" && pathname.startsWith("/v/")) return serveViewRoute(request, env);
 
@@ -161,13 +165,19 @@ async function routeRequest(request, env, ctx) {
     return listDashboardPagesApi(request, env);
   }
 
+  if (request.method === "GET" && pathname === "/api/events") {
+    const auth = await requireAuth(request, env, { json: true });
+    if (auth.response) return auth.response;
+    return openChangeEventStream(env);
+  }
+
   const dashboardDocumentVisibilityMatch = pathname.match(/^\/api\/dashboard\/documents\/([^/]+)\/visibility$/);
   if (request.method === "PATCH" && dashboardDocumentVisibilityMatch) {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
     const slug = safeDecodeURIComponent(dashboardDocumentVisibilityMatch[1]);
     if (!isValidDocumentSlug(slug)) return json({ error: "Not found" }, 404);
-    return updateDocumentVisibility(request, env, slug);
+    return updateDocumentVisibility(request, env, ctx, slug);
   }
 
   const dashboardDocumentApiMatch = pathname.match(/^\/api\/dashboard\/documents\/([^/]+)$/);
@@ -210,14 +220,14 @@ async function routeRequest(request, env, ctx) {
   if (visibilityMatch && request.method === "PATCH") {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
-    return updateVisibility(request, env, visibilityMatch[1]);
+    return updateVisibility(request, env, ctx, visibilityMatch[1]);
   }
 
   const deleteMatch = pathname.match(/^\/api\/pages\/([0-9a-f]{12})$/);
   if (deleteMatch && request.method === "DELETE") {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
-    return deletePage(env, deleteMatch[1]);
+    return deletePage(env, ctx, deleteMatch[1]);
   }
 
   if (request.method === "GET" && (pathname === "/" || pathname === "/dashboard")) {
@@ -258,7 +268,7 @@ function assertRequiredEnv(env) {
   }
 }
 
-async function uploadPage(request, env) {
+async function uploadPage(request, env, ctx) {
   if (!hasBearerToken(request, env.PAGES_API_TOKEN)) return json({ error: "Unauthorized" }, 401);
   if (Number(request.headers.get("content-length") || 0) > MAX_REQUEST_BYTES) {
     return json({ error: "Request body exceeds 75 MB limit" }, 413);
@@ -380,6 +390,8 @@ async function uploadPage(request, env) {
     httpMetadata: { contentType: entrypointFile.contentType },
   });
 
+  if (documentRecord?.slug) notifyChange(env, ctx, "document_updated", documentRecord.slug);
+  else notifyChange(env, ctx, "page_updated", id);
   return json(buildUploadResponse({ id, baseUrl: env.BASE_URL, documentRecord, review, isPrivate }), 201);
 }
 
@@ -592,7 +604,7 @@ async function getDocumentApi(request, env, slug) {
   return json(formatDocumentResponse(documentRecord, env.BASE_URL));
 }
 
-async function updateVisibility(request, env, pageId) {
+async function updateVisibility(request, env, ctx, pageId) {
   let body;
   try {
     body = await request.json();
@@ -604,10 +616,11 @@ async function updateVisibility(request, env, pageId) {
   if (!meta) return json({ error: "Not found" }, 404);
   meta.private = body.private;
   await writeMeta(env, pageId, meta);
+  notifyChange(env, ctx, "page_updated", pageId);
   return json({ id: pageId, private: meta.private });
 }
 
-async function updateDocumentVisibility(request, env, slug) {
+async function updateDocumentVisibility(request, env, ctx, slug) {
   let body;
   try {
     body = await request.json();
@@ -624,10 +637,11 @@ async function updateDocumentVisibility(request, env, slug) {
     }, 409);
   }
   const { status: _status, ...payload } = result;
+  notifyChange(env, ctx, "document_updated", slug);
   return json(payload);
 }
 
-async function deletePage(env, pageId) {
+async function deletePage(env, ctx, pageId) {
   const meta = await readMeta(env, pageId);
   if (!meta) return json({ error: "Not found" }, 404);
   const deleted = await deleteDashboardPageData(env, pageId);
@@ -636,6 +650,7 @@ async function deletePage(env, pageId) {
     pageHtmlKey(pageId),
     ...deleted.assetKeys,
   ]);
+  notifyChange(env, ctx, "page_updated", pageId);
   return new Response(null, { status: 204 });
 }
 
@@ -726,6 +741,7 @@ async function appendAnnotation(request, env, ctx, revId) {
     return json({ok:true,revId,id:comment.id});
   }
   notifyAnnotation(env,ctx,access.meta,revId);
+  notifyRevisionChange(env, ctx, access.meta, revId);
   return json({ok:true,revId,id:comment.id},201);
 }
 
@@ -752,6 +768,7 @@ async function appendAnnotationReply(request, env, ctx, revId, commentId) {
     return json({ok:true,revId,id:reply.id,commentId});
   }
   notifyAnnotation(env,ctx,access.meta,revId);
+  notifyRevisionChange(env, ctx, access.meta, revId);
   return json({ok:true,revId,id:reply.id,commentId},201);
 }
 
@@ -800,6 +817,7 @@ async function replaceAnnotations(request, env, ctx, revId) {
     const event = buildAnnotationWebhookEvent({ revId, count: payload.comments.length });
     ctx.waitUntil(postAnnotationWebhook({ url: meta.review.webhookUrl, payload: event, secret: webhookSecret }));
   }
+  notifyRevisionChange(env, ctx, meta, revId);
   return json({ ok: true, revId, count: payload.comments.length });
 }
 
@@ -2544,4 +2562,103 @@ async function sha256Hex(value) {
 
 function bytesToHex(bytes) {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function openChangeEventStream(env) {
+  const events = env.PAGES_EVENTS;
+  if (!events) return json({ error: "Change events are not configured" }, 503);
+  const stub = events.get(events.idFromName(CHANGE_EVENT_STREAM_NAME));
+  return stub.fetch("https://pages-events.internal/stream");
+}
+
+function notifyChange(env, ctx, type, id) {
+  const events = env.PAGES_EVENTS;
+  if (!events || typeof ctx?.waitUntil !== "function") return;
+  ctx.waitUntil((async () => {
+    const stub = events.get(events.idFromName(CHANGE_EVENT_STREAM_NAME));
+    await stub.fetch("https://pages-events.internal/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, id }),
+    });
+  })().catch((error) => console.error("[pages-worker] change notification failed", error)));
+}
+
+function notifyRevisionChange(env, ctx, meta, revId) {
+  const slug = meta?.document?.slug;
+  if (slug) notifyChange(env, ctx, "document_updated", slug);
+  else notifyChange(env, ctx, "page_updated", revId);
+}
+
+export class PagesEvents {
+  constructor() {
+    this.clients = new Set();
+    this.keepaliveTimer = null;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/stream") return this.openStream();
+    if (request.method === "POST" && url.pathname === "/notify") return this.publish(request);
+    return new Response(null, { status: 404 });
+  }
+
+  openStream() {
+    const encoder = new TextEncoder();
+    let client;
+    const stream = new ReadableStream({
+      start: (controller) => {
+        client = { controller, encoder };
+        this.clients.add(client);
+        this.startKeepalive();
+      },
+      cancel: () => {
+        this.clients.delete(client);
+        this.stopKeepaliveWhenIdle();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  async publish(request) {
+    let payload;
+    try {
+      payload = await request.json();
+    } catch {
+      return new Response(null, { status: 400 });
+    }
+    if (!payload || !CHANGE_EVENT_TYPES.has(payload.type) || typeof payload.id !== "string" || !payload.id) {
+      return new Response(null, { status: 400 });
+    }
+    this.broadcast(`event: ${payload.type}\ndata: ${JSON.stringify({ type: payload.type, id: payload.id })}\n\n`);
+    return new Response(null, { status: 204 });
+  }
+
+  broadcast(frame) {
+    const bytes = new TextEncoder().encode(frame);
+    for (const client of [...this.clients]) {
+      try {
+        client.controller.enqueue(bytes);
+      } catch {
+        this.clients.delete(client);
+      }
+    }
+    this.stopKeepaliveWhenIdle();
+  }
+
+  startKeepalive() {
+    if (this.keepaliveTimer) return;
+    this.keepaliveTimer = setInterval(() => this.broadcast(": keepalive\n\n"), CHANGE_EVENT_KEEPALIVE_MS);
+  }
+
+  stopKeepaliveWhenIdle() {
+    if (this.clients.size || !this.keepaliveTimer) return;
+    clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = null;
+  }
 }

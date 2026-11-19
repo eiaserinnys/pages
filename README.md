@@ -19,6 +19,7 @@ A lightweight HTML page hosting service running as a Cloudflare Worker. Clients 
 
 - D1 database: `pages` (`af7049be-6ba5-4261-bc05-e5773d3eec33`), bound as `PAGES_DB`
 - Private R2 bucket: `pages-content`, bound as `PAGES_BUCKET`; uploaded HTML and bundle files are stored here so private pages are not exposed through a public R2 URL
+- Durable Object class `PagesEvents` (SQLite-backed), bound as `PAGES_EVENTS`; it holds the open change-event streams
 - Custom domain route: `pages.eiaserinnys.me` in zone `eiaserinnys.me`, configured in `wrangler.toml`; `workers_dev = true` also keeps the workers.dev URL
 
 ## Configuration
@@ -42,6 +43,7 @@ Non-secret variables and bindings live in `wrangler.toml`:
 | `ALLOWED_EMAILS` | var        | Comma-separated Google accounts allowed to sign in                                  |
 | `PAGES_DB`       | D1 binding | Metadata for documents, revisions, bundle assets, annotations, and webhook secrets  |
 | `PAGES_BUCKET`   | R2 binding | Page metadata, entrypoint HTML, and bundle assets                                   |
+| `PAGES_EVENTS`   | Durable Object binding | `PagesEvents` hub that holds open change-event streams                  |
 
 The private VTuber voice demo additionally needs a `VTUBER_OPENAI_API_KEY` secret for `POST /api/vtuber-live/session`; without it the endpoint answers `503`. See `docs/vtuber-live.md`.
 
@@ -254,6 +256,27 @@ X-Pages-Webhook-Signature: sha256=<hex hmac over the exact JSON body>
 
 Webhook delivery has a 5 second timeout, logs failures to stderr, and does not retry. Delivery failure does not change the annotation response.
 
+### Change events
+
+`GET /api/events` keeps a Server-Sent Events stream open so dashboard clients can refresh their lists when stored data changes. It accepts the same Google OAuth session cookie or OAuth Bearer token as the other `/api/dashboard/*` routes and answers `401` without one. A Durable Object (`PagesEvents`) holds the open connections, so every Worker instance can publish to the same stream.
+
+Server-sent frames:
+
+```
+event: document_updated
+data: {"type":"document_updated","id":"<slug>"}
+
+event: page_updated
+data: {"type":"page_updated","id":"<pageId>"}
+```
+
+| Event kind         | Sent after                                                                                     |
+|--------------------|------------------------------------------------------------------------------------------------|
+| `document_updated` | Upload into a document, document visibility change, comment or reply on a document revision   |
+| `page_updated`     | Standalone page upload, page visibility change, page deletion, comment or reply on a page     |
+
+Only the event kind and the affected id are sent, never page content. The stream sends a `: keepalive` comment line every 30 seconds. Notifications are best-effort: each write publishes after it succeeds, and a failed notification is logged without changing the write response.
+
 ### Other endpoints
 
 Private pages and documents require a Google OAuth session or OAuth Bearer token unless they are opened through a signed `/v/:token/` link. Annotation writes always require the rev-scoped capability token.
@@ -285,6 +308,7 @@ Private pages and documents require a Google OAuth session or OAuth Bearer token
 | `GET`    | `/api/dashboard/documents`                       | Google OAuth                         | List documents (paginated)                     |
 | `GET`    | `/api/dashboard/documents/:slug`                 | Google OAuth                         | Document detail                                |
 | `PATCH`  | `/api/dashboard/documents/:slug/visibility`      | Google OAuth                         | Set visibility for every revision of a document |
+| `GET`    | `/api/events`                                    | Google OAuth                         | Change events as a Server-Sent Events stream   |
 | `GET`    | `/api/dashboard/pages`                           | Google OAuth                         | List standalone pages (paginated)              |
 | `GET`    | `/api/dashboard/pages/:pageId`                   | Google OAuth                         | Page detail                                    |
 | `PATCH`  | `/api/pages/:id/visibility`                      | Google OAuth                         | Set page visibility (`{ "private": boolean }`) |
