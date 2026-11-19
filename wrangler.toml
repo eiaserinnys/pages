@@ -17,6 +17,14 @@ migrations_dir = "migrations"
 binding = "PAGES_BUCKET"
 bucket_name = "pages-content"
 
+[[durable_objects.bindings]]
+name = "PAGES_EVENTS"
+class_name = "PagesEvents"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PagesEvents"]
+
 [[routes]]
 pattern = "pages.eiaserinnys.me"
 zone_name = "eiaserinnys.me"
