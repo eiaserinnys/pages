@@ -277,6 +277,10 @@ data: {"type":"page_updated","id":"<pageId>"}
 
 Only the event kind and the affected id are sent, never page content. The stream sends a `: keepalive` comment line every 30 seconds. Notifications are best-effort: each write publishes after it succeeds, and a failed notification is logged without changing the write response.
 
+### Document state
+
+A published document can opt in to a password-locked server-side state: the browser encrypts a state blob with a key derived from the page password, and the Worker only stores the opaque string and a version number. `GET` and `PUT /api/documents/:slug/state` read and write it; a `PUT` with a stale `baseVersion` answers `409`. See `docs/document-state.md` for the marker format, key derivation, responses and the `scripts/build-encrypted-page.mjs` builder.
+
 ### Other endpoints
 
 Private pages and documents require a Google OAuth session or OAuth Bearer token unless they are opened through a signed `/v/:token/` link. Annotation writes always require the rev-scoped capability token.

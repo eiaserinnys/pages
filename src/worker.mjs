@@ -10,6 +10,7 @@ import {
   verifyOAuthAccessToken,
   verifyViewToken,
 } from './oauthProvider.mjs';
+import { getDocState, parseDocStateMarker, putDocState, registerDocState } from './docState.mjs';
 import {
   dashboardQuery as readDashboardQuery,
   deleteDashboardPageData,
@@ -198,6 +199,9 @@ async function routeRequest(request, env, ctx) {
     return detail ? json(detail) : json({ error: "Not found" }, 404);
   }
 
+  const documentStateMatch = pathname.match(/^\/api\/documents\/([^/]+)\/state$/);
+  if (documentStateMatch) return documentStateApi(request, env, safeDecodeURIComponent(documentStateMatch[1]));
+
   const documentApiMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
   if (request.method === "GET" && documentApiMatch) {
     return getDocumentApi(request, env, decodeURIComponent(documentApiMatch[1]));
@@ -301,6 +305,15 @@ async function uploadPage(request, env, ctx) {
   const validationError = validateUploadOptions(body);
   if (validationError) return json({ error: validationError }, 400);
 
+  let docStateConfig = null;
+  if (body.doc) {
+    try {
+      docStateConfig = parseDocStateMarker(bundle.files.find((file) => file.path === bundle.entrypoint).bytes);
+    } catch (err) {
+      return json({ error: err.message }, err.statusCode || 400);
+    }
+  }
+
   const id = newPageId();
   const title = titleValue(body.title);
   const owner = ownerValue(body.owner);
@@ -371,6 +384,8 @@ async function uploadPage(request, env, ctx) {
   } catch (err) {
     return json({ error: err.message }, err.statusCode || 400);
   }
+
+  if (docStateConfig) await registerDocState(env, revisionDocument.docId, docStateConfig, createdAt);
 
   const meta = buildPageMeta({
     id,
@@ -592,16 +607,38 @@ async function reviewPageResponse(object, contentType, meta, env, assetPath = "i
   return response;
 }
 
+// Private documents require a signed-in session; returns a Response to send, or null when readable.
+async function documentReadDenied(request, env, documentRecord) {
+  const latestMeta = documentRecord.latestRevision ? await readMeta(env, documentRecord.latestRevision) : null;
+  if (!latestMeta?.private) return null;
+  const auth = await requireAuth(request, env, { json: true });
+  return auth.response || null;
+}
+
 async function getDocumentApi(request, env, slug) {
   if (!isValidDocumentSlug(slug)) return json({ error: "Not found" }, 404);
   const documentRecord = await getDocument(env, slug);
   if (!documentRecord) return json({ error: "Not found" }, 404);
-  const latestMeta = documentRecord.latestRevision ? await readMeta(env, documentRecord.latestRevision) : null;
-  if (latestMeta?.private) {
-    const auth = await requireAuth(request, env, { json: true });
-    if (auth.response) return auth.response;
-  }
+  const denied = await documentReadDenied(request, env, documentRecord);
+  if (denied) return denied;
   return json(formatDocumentResponse(documentRecord, env.BASE_URL));
+}
+
+async function documentStateApi(request, env, slug) {
+  if (request.method !== "GET" && request.method !== "PUT") {
+    const response = json({ error: "method_not_allowed" }, 405);
+    response.headers.set("Allow", "GET, PUT");
+    return response;
+  }
+  if (!isValidDocumentSlug(slug)) return json({ error: "document_not_found" }, 404);
+  const documentRecord = await getDocument(env, slug);
+  if (!documentRecord) return json({ error: "document_not_found" }, 404);
+  const denied = await documentReadDenied(request, env, documentRecord);
+  if (denied) return denied;
+  const result = request.method === "GET"
+    ? await getDocState(env, documentRecord.docId)
+    : await putDocState(request, env, documentRecord.docId);
+  return json(result.body, result.status);
 }
 
 async function updateVisibility(request, env, ctx, pageId) {
