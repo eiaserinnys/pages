@@ -29,6 +29,11 @@ function createDatabase() {
       size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (rev_id, path)
     );
+    CREATE TABLE document_state (
+      doc_id TEXT PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
+      salt TEXT NOT NULL, iter INTEGER NOT NULL, verifier TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 0, blob TEXT, updated_at TEXT
+    );
     CREATE TABLE oauth_used_codes (
       jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
     );
