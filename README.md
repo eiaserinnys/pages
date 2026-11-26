@@ -38,15 +38,15 @@ Both ways need the same three things. What every variable means is listed once, 
 
 ### Install on a Linux server with Node
 
-Run everything as `root` on the server (`sudo -i` if you log in as a sudo user), in one shell session. Steps 3 and 6 reuse the variables you set in step 3.
+Run everything as `root` on the server (`sudo -i` if you log in as a sudo user), in one shell session. Step 6 reuses the variables set in step 3.
 
 **1. Install Node 22, git and openssl.** Debian 13 ships Node 20 and Ubuntu 24.04 ships Node 18, which are too old, so Node 22 comes from NodeSource:
 
 ```bash
-apt-get update
-apt-get install -y curl ca-certificates git openssl
+apt-get update </dev/null
+apt-get install -y curl ca-certificates git openssl </dev/null
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y nodejs
+apt-get install -y nodejs </dev/null
 node --version
 ```
 
@@ -66,7 +66,7 @@ npm ci --omit=dev
 
 ```bash
 export PAGES_DOMAIN=pages.example.com          # your domain, already pointing at this server
-export ADMIN_EMAIL=you@example.com             # the Google account that may sign in
+export ADMIN_EMAIL=you@example.com             # a real address you can receive mail at (see below)
 export GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 export GOOGLE_CLIENT_SECRET=your-client-secret
 ```
@@ -84,6 +84,8 @@ PAGES_DB_FILE=/var/lib/pages/pages.sqlite
 EOF
 ```
 
+`ADMIN_EMAIL` is the account allowed to sign in and also the contact address certbot registers with Let's Encrypt in step 6, so it must be a real address; Let's Encrypt rejects placeholder addresses such as `you@example.com`.
+
 `PORT` (default `3110`) and `HOST` (default `127.0.0.1`) are optional and left out; the nginx example below proxies to `127.0.0.1:3110`.
 
 **4. Start it once by hand.** The server reads `.env` from its working directory, so start it from `/opt/pages`. It runs as the service user, exactly as it will under systemd:
@@ -97,13 +99,13 @@ It prints `[pages-node] listening on http://127.0.0.1:3110 (database: /var/lib/p
 
 ```bash
 TOKEN=$(grep '^PAGES_API_TOKEN=' /opt/pages/.env | cut -d= -f2)
-curl -sS -X POST http://127.0.0.1:3110/api/pages \
+curl -sS -w '\n%{http_code}\n' -X POST http://127.0.0.1:3110/api/pages \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   --data '{"doc":"hello","title":"Hello","html":"<html><body><h1>It works</h1></body></html>"}'
-curl -sS http://127.0.0.1:3110/d/hello/
+curl -sS -w '\n%{http_code}\n' http://127.0.0.1:3110/d/hello/
 ```
 
-The first call answers `201` with the page `url`, `stableUrl` and `private`; the second prints the page you just uploaded. The request body is the same as in [Upload a page](#upload-a-page). Stop the server with `Ctrl-C` in the first shell.
+The first call prints the JSON answer (the page `url`, `stableUrl` and `private`) and then `201`; the second prints the page you just uploaded and then `200`. The request body is the same as in [Upload a page](#upload-a-page). Stop the server with `Ctrl-C` in the first shell.
 
 **5. Run it with systemd.** One process only; do not start a second copy, because the change event stream (`/api/events`) lives inside the process.
 
@@ -135,7 +137,7 @@ Logs: `journalctl -u pages -f`.
 **6. Put nginx and HTTPS in front.** The session cookie is `Secure`, so signing in does not work over plain `http://`; the dashboard needs the HTTPS address. This installs nginx, proxies the domain to the local port and gets a Let's Encrypt certificate with certbot (ports 80 and 443 must be reachable from the internet):
 
 ```bash
-apt-get install -y nginx certbot python3-certbot-nginx
+apt-get install -y nginx certbot python3-certbot-nginx </dev/null
 cat > /etc/nginx/conf.d/pages.conf <<'EOF'
 server {
     listen 80;
@@ -187,7 +189,7 @@ systemctl restart pages
 **8. Back up.** All data is one SQLite file in WAL mode, so copy it with SQLite's own backup command (safe while the service runs), then move the copy off the server:
 
 ```bash
-apt-get install -y sqlite3
+apt-get install -y sqlite3 </dev/null
 install -d -o pages -g pages /var/lib/pages/backups
 runuser -u pages -- sqlite3 /var/lib/pages/pages.sqlite ".backup '/var/lib/pages/backups/pages-$(date +%F).sqlite'"
 ```
