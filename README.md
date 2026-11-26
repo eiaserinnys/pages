@@ -1,6 +1,6 @@
 # pages
 
-A lightweight HTML page hosting service running as a Cloudflare Worker. Clients upload HTML or multifile bundles through a Bearer-token-authenticated API and receive a stable page URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
+A lightweight HTML page hosting service. It runs as a Cloudflare Worker, or on one Linux server with Node and SQLite. Clients upload HTML or multifile bundles through a Bearer-token-authenticated API and receive a stable page URL; a Google OAuth-protected dashboard lets authorized users manage visibility and deletion.
 
 ![Dashboard](docs/dashboard.png)
 
@@ -15,18 +15,229 @@ A lightweight HTML page hosting service running as a Cloudflare Worker. Clients 
 - **Bearer token auth** — API writes require `Authorization: Bearer <token>`
 - **Bundle limits** — uploads are capped at 200 files and 50 MB per bundle; request bodies are capped at 75 MB
 
-## Cloudflare resources
+## Install
 
-- D1 database: `pages` (`af7049be-6ba5-4261-bc05-e5773d3eec33`), bound as `PAGES_DB`
-- Private R2 bucket: `pages-content`, bound as `PAGES_BUCKET`; uploaded HTML and bundle files are stored here so private pages are not exposed through a public R2 URL
-- Durable Object class `PagesEvents` (SQLite-backed), bound as `PAGES_EVENTS`; it holds the open change-event streams
-- Custom domain route: `pages.eiaserinnys.me` in zone `eiaserinnys.me`, configured in `wrangler.toml`; `workers_dev = true` also keeps the workers.dev URL
+Pick one way to run pages:
 
-## Configuration
+- **[Your own Linux server](#install-on-a-linux-server-with-node)** — one Node 22 process, one SQLite file, nginx in front for HTTPS. The steps are written for a fresh Debian 13 or Ubuntu 24.04 server and can be pasted from top to bottom.
+- **[Cloudflare Workers](#install-on-cloudflare-workers)** — the Worker with a D1 database, an R2 bucket and a Durable Object.
 
-The Worker reads secrets, plain variables, and bindings. Every request fails with `500` if `PAGES_BUCKET`, `PAGES_DB`, `PAGES_API_TOKEN`, `SESSION_SECRET`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, or `ALLOWED_EMAILS` is missing.
+### Before you start
 
-Required secrets:
+Both ways need the same three things. What every variable means is listed once, in [Configuration](#configuration).
+
+1. **A public HTTPS address** for `BASE_URL`, for example `https://pages.example.com` (no trailing slash). On your own server, create a DNS `A` (and `AAAA`) record that points the name at the server first.
+2. **A Google OAuth client** for the dashboard sign-in. In the Google Cloud Console open *APIs & Services* → *Credentials* → *Create credentials* → *OAuth client ID* (Google asks you to configure the OAuth consent screen first if the project has none). Choose the application type *Web application* and add this authorized redirect URI:
+
+   ```
+   <BASE_URL>/auth/google/callback
+   ```
+
+   Copy the client ID and the client secret; they become `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+3. **The Google accounts allowed to sign in**, as a comma-separated list for `ALLOWED_EMAILS`.
+
+### Install on a Linux server with Node
+
+Run everything as `root` on the server (`sudo -i` if you log in as a sudo user), in one shell session. Steps 3 and 6 reuse the variables you set in step 3.
+
+**1. Install Node 22, git and openssl.** Debian 13 ships Node 20 and Ubuntu 24.04 ships Node 18, which are too old, so Node 22 comes from NodeSource:
+
+```bash
+apt-get update
+apt-get install -y curl ca-certificates git openssl
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+node --version
+```
+
+`node --version` must print `v22.x`. If `npm ci` in step 2 fails while building `better-sqlite3` (no prebuilt binary for your CPU), run `apt-get install -y build-essential python3` and repeat it.
+
+**2. Create the service user and install the code.** The code stays owned by `root`; the service user can only write the data folder:
+
+```bash
+useradd --system --user-group --home-dir /var/lib/pages --no-create-home --shell /usr/sbin/nologin pages
+install -d -o pages -g pages /var/lib/pages
+git clone https://github.com/eiaserinnys/pages.git /opt/pages
+cd /opt/pages
+npm ci --omit=dev
+```
+
+**3. Write the configuration.** Replace the four values in the first block, then paste both blocks. The two secrets are generated for you:
+
+```bash
+export PAGES_DOMAIN=pages.example.com          # your domain, already pointing at this server
+export ADMIN_EMAIL=you@example.com             # the Google account that may sign in
+export GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+export GOOGLE_CLIENT_SECRET=your-client-secret
+```
+
+```bash
+install -m 640 -o root -g pages /dev/null /opt/pages/.env
+cat >> /opt/pages/.env <<EOF
+PAGES_API_TOKEN=$(openssl rand -hex 32)
+SESSION_SECRET=$(openssl rand -hex 32)
+BASE_URL=https://$PAGES_DOMAIN
+ALLOWED_EMAILS=$ADMIN_EMAIL
+GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
+PAGES_DB_FILE=/var/lib/pages/pages.sqlite
+EOF
+```
+
+`PORT` (default `3110`) and `HOST` (default `127.0.0.1`) are optional and left out; the nginx example below proxies to `127.0.0.1:3110`.
+
+**4. Start it once by hand.** The server reads `.env` from its working directory, so start it from `/opt/pages`. It runs as the service user, exactly as it will under systemd:
+
+```bash
+cd /opt/pages
+runuser -u pages -- node src/node/server.mjs
+```
+
+It prints `[pages-node] listening on http://127.0.0.1:3110 (database: /var/lib/pages/pages.sqlite)` and applies the database migrations on the first start. (`npm start` runs the same file.) Leave it running, open a second shell on the server and upload a document with the API token:
+
+```bash
+TOKEN=$(grep '^PAGES_API_TOKEN=' /opt/pages/.env | cut -d= -f2)
+curl -sS -X POST http://127.0.0.1:3110/api/pages \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data '{"doc":"hello","title":"Hello","html":"<html><body><h1>It works</h1></body></html>"}'
+curl -sS http://127.0.0.1:3110/d/hello/
+```
+
+The first call answers `201` with the page `url`, `stableUrl` and `private`; the second prints the page you just uploaded. The request body is the same as in [Upload a page](#upload-a-page). Stop the server with `Ctrl-C` in the first shell.
+
+**5. Run it with systemd.** One process only; do not start a second copy, because the change event stream (`/api/events`) lives inside the process.
+
+```bash
+cat > /etc/systemd/system/pages.service <<'EOF'
+[Unit]
+Description=pages
+After=network.target
+
+[Service]
+Type=simple
+User=pages
+Group=pages
+WorkingDirectory=/opt/pages
+ExecStart=/usr/bin/node src/node/server.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now pages
+systemctl --no-pager status pages
+```
+
+Logs: `journalctl -u pages -f`.
+
+**6. Put nginx and HTTPS in front.** The session cookie is `Secure`, so signing in does not work over plain `http://`; the dashboard needs the HTTPS address. This installs nginx, proxies the domain to the local port and gets a Let's Encrypt certificate with certbot (ports 80 and 443 must be reachable from the internet):
+
+```bash
+apt-get install -y nginx certbot python3-certbot-nginx
+cat > /etc/nginx/conf.d/pages.conf <<'EOF'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pages.example.com;
+
+    # Uploads are capped at 75 MB by the server; nginx's default of 1 MB would reject them first.
+    client_max_body_size 80m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3110;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+    }
+
+    # Server-Sent Events: do not buffer the stream.
+    location = /api/events {
+        proxy_pass http://127.0.0.1:3110;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+    }
+}
+EOF
+sed -i "s/pages.example.com/$PAGES_DOMAIN/" /etc/nginx/conf.d/pages.conf
+nginx -t && systemctl reload nginx
+certbot --nginx -d "$PAGES_DOMAIN" -m "$ADMIN_EMAIL" --agree-tos --no-eff-email --non-interactive --redirect
+```
+
+certbot rewrites the `server` block for HTTPS and renews the certificate with its systemd timer. Check it from anywhere:
+
+```bash
+curl -sS "https://$PAGES_DOMAIN/d/hello/"
+```
+
+Then open `https://<your domain>/` in a browser and sign in with an account from `ALLOWED_EMAILS`. To upload from another machine, use the same `curl` as in step 4 with `https://<your domain>` instead of `http://127.0.0.1:3110` and the `PAGES_API_TOKEN` value from `/opt/pages/.env`.
+
+**7. Update.** Migrations in `migrations/` that are not yet applied run by themselves when the service starts:
+
+```bash
+cd /opt/pages
+git pull --ff-only
+npm ci --omit=dev
+systemctl restart pages
+```
+
+**8. Back up.** All data is one SQLite file in WAL mode, so copy it with SQLite's own backup command (safe while the service runs), then move the copy off the server:
+
+```bash
+apt-get install -y sqlite3
+install -d -o pages -g pages /var/lib/pages/backups
+runuser -u pages -- sqlite3 /var/lib/pages/pages.sqlite ".backup '/var/lib/pages/backups/pages-$(date +%F).sqlite'"
+```
+
+Or stop the service (`systemctl stop pages`) and copy `pages.sqlite` together with `pages.sqlite-wal` and `pages.sqlite-shm` if they exist. [Node server behavior](#node-server-behavior) explains what lives in that file.
+
+### Install on Cloudflare Workers
+
+Run these on any machine with Node 22 and git (your laptop is fine). They use the Wrangler version the repository pins, `4.86.0`, through `npx`.
+
+**1. Get the code and sign in to Cloudflare:**
+
+```bash
+git clone https://github.com/eiaserinnys/pages.git
+cd pages
+npx --yes wrangler@4.86.0 login
+```
+
+`login` opens a browser. On a machine without one, export `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (an API token that may edit Workers, D1 and R2) instead of running `login`.
+
+**2. Create the D1 database and the R2 bucket:**
+
+```bash
+npx --yes wrangler@4.86.0 d1 create pages
+npx --yes wrangler@4.86.0 r2 bucket create pages-content
+```
+
+`d1 create` prints the new `database_id`. If Wrangler offers to add the database to `wrangler.toml`, answer no; the binding is already there and you edit it in the next step.
+
+**3. Make `wrangler.toml` yours.** The file describes the author's deployment ([This repository's deployment](#this-repositorys-deployment) lists it). Change:
+
+- `database_id` under `[[d1_databases]]` to the id from step 2. Keep `database_name = "pages"`; `npm run worker:migrate:d1` applies the migrations to the database of that name. If you named the bucket differently, change `bucket_name` under `[[r2_buckets]]`.
+- `BASE_URL` and `ALLOWED_EMAILS` under `[vars]`.
+- The `[[routes]]` block. To serve from your own domain, set `pattern` to the domain and `zone_name` to its Cloudflare zone (the zone must be in your account). To use only the `workers.dev` address, delete the whole block (`workers_dev = true` stays). The `workers.dev` address is `https://pages-cloudflare.<your-subdomain>.workers.dev`; you see it in step 5 and then put it in `BASE_URL`.
+
+**4. Apply the database migrations** (`npm run` needs no `npm install`; it only calls Wrangler):
+
+```bash
+npm run worker:migrate:d1
+```
+
+**5. Deploy:**
+
+```bash
+npx --yes wrangler@4.86.0 deploy
+```
+
+Wrangler prints the Worker's URL. If you use `workers.dev`, set `BASE_URL` in `wrangler.toml` to it and run the deploy again.
+
+**6. Set the four secrets.** Each command asks for the value. Use `openssl rand -hex 32` for `PAGES_API_TOKEN` and `SESSION_SECRET`, and the client ID and secret from [Before you start](#before-you-start) for the Google values:
 
 ```bash
 npx --yes wrangler@4.86.0 secret put PAGES_API_TOKEN
@@ -35,17 +246,59 @@ npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_ID
 npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
 ```
 
-Non-secret variables and bindings live in `wrangler.toml`:
+If the four values are in a dotenv file, `npm run worker:set-secrets -- --source-env <file>` sets all of them (it needs `python3`; without `--source-env` it reads the same names from the environment). Secrets survive later deploys. Until all four exist, every request answers `500`.
 
-| Setting          | Kind       | Description                                                                         |
-|------------------|------------|-------------------------------------------------------------------------------------|
-| `BASE_URL`       | var        | Public base URL without a trailing slash                                            |
-| `ALLOWED_EMAILS` | var        | Comma-separated Google accounts allowed to sign in                                  |
-| `PAGES_DB`       | D1 binding | Metadata for documents, revisions, bundle assets, annotations, and webhook secrets  |
-| `PAGES_BUCKET`   | R2 binding | Page metadata, entrypoint HTML, and bundle assets                                   |
-| `PAGES_EVENTS`   | Durable Object binding | `PagesEvents` hub that holds open change-event streams                  |
+**7. Add the redirect URI** `<BASE_URL>/auth/google/callback` to the Google OAuth client if you have not yet (with `workers.dev`, this is the first time you know the address). Then upload a document and open `<BASE_URL>/` to sign in:
 
-The private VTuber voice demo additionally needs a `VTUBER_OPENAI_API_KEY` secret for `POST /api/vtuber-live/session`; without it the endpoint answers `503`. See `docs/vtuber-live.md`.
+```bash
+curl -sS -X POST https://pages.example.com/api/pages \
+  -H 'Authorization: Bearer <your PAGES_API_TOKEN>' -H 'Content-Type: application/json' \
+  --data '{"doc":"hello","title":"Hello","html":"<html><body><h1>It works</h1></body></html>"}'
+```
+
+Replace the address with your `BASE_URL`; `https://pages.example.com/d/hello/` (your address) then shows the page.
+
+**Deploying from GitHub Actions.** `.github/workflows/cloudflare-worker.yml` deploys the `main` branch of your copy of the repository. Add two repository secrets under *Settings* → *Secrets and variables* → *Actions*: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. A push that touches the workflow, the Worker sources, `wrangler.toml`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build and the review-browser test against the built Worker, then deploys with `wrangler@4.86.0`. Pull requests run the same checks but never deploy.
+
+A push that changes `migrations/**` stops the automatic deploy. Run the workflow manually from the *Actions* tab with `apply_d1_migrations` checked to apply the D1 migrations and then deploy.
+
+## Configuration
+
+Both runtimes read the same variable names. On Cloudflare the secrets are set with `wrangler secret put` and the plain variables live in `wrangler.toml`; on Node every value comes from the environment or from the `.env` file in the working directory (`PAGES_ENV_FILE` points to another file). If a required value is missing, every Worker request fails with `500` and the Node server refuses to start.
+
+| Name | Kind | Runtime | Description |
+|---|---|---|---|
+| `PAGES_API_TOKEN` | required, secret | both | Bearer token for `POST /api/pages` |
+| `SESSION_SECRET` | required, secret | both | Signs session cookies, annotation capability tokens, OAuth tokens and signed view links; changing it signs everyone out and invalidates issued links |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | required, secret | both | The Google OAuth client; its redirect URI is `<BASE_URL>/auth/google/callback` |
+| `BASE_URL` | required | both | Public base URL without a trailing slash |
+| `ALLOWED_EMAILS` | required | both | Comma-separated Google accounts allowed to sign in |
+| `VTUBER_OPENAI_API_KEY` | optional, secret | both | For `POST /api/vtuber-live/session` of the private VTuber voice demo; without it the endpoint answers `503`. See `docs/vtuber-live.md` |
+| `PORT` | optional | Node | Listening port, default `3110` |
+| `HOST` | optional | Node | Listening address, default `127.0.0.1` |
+| `PAGES_DB_FILE` | optional | Node | The SQLite database file, default `./data/pages.sqlite` relative to the working directory; missing parent folders are created |
+| `PAGES_ENV_FILE` | optional | Node | Path of the env file, default `.env` in the working directory |
+
+The Worker also needs three bindings. They are declared in `wrangler.toml`; the Node server provides its own stand-ins.
+
+| Binding | Kind | Description |
+|---|---|---|
+| `PAGES_DB` | D1 | Metadata for documents, revisions, bundle assets, annotations, and webhook secrets |
+| `PAGES_BUCKET` | R2 | Page metadata, entrypoint HTML, and bundle assets |
+| `PAGES_EVENTS` | Durable Object | `PagesEvents` hub that holds open change-event streams |
+
+## This repository's deployment
+
+`wrangler.toml` describes the author's own deployment. These are the values you replace when you install pages for yourself ([Install on Cloudflare Workers](#install-on-cloudflare-workers), step 3):
+
+- Worker `pages-cloudflare`, with `workers_dev = true` keeping the workers.dev URL
+- Custom domain route `pages.eiaserinnys.me` in zone `eiaserinnys.me` (the `[[routes]]` block)
+- D1 database `pages` with id `af7049be-6ba5-4261-bc05-e5773d3eec33`, bound as `PAGES_DB`; the id belongs to the author's account
+- Private R2 bucket `pages-content`, bound as `PAGES_BUCKET`; uploaded HTML and bundle files are stored here so private pages are not exposed through a public R2 URL
+- `BASE_URL` and `ALLOWED_EMAILS` under `[vars]`
+- Durable Object class `PagesEvents` (SQLite-backed), bound as `PAGES_EVENTS`; keep the `[[migrations]]` block that creates it
+
+On the author's server the Node entry point runs under pm2: `pm2 start ecosystem.config.js` starts it from `~/services/pages/current`. `ecosystem.config.js` sets `cwd` via `process.env.HOME`, so do not change it to a relative path.
 
 ## API
 
@@ -321,51 +574,30 @@ Private pages and documents require a Google OAuth session or OAuth Bearer token
 | `GET`    | `/`, `/dashboard`                                | Google OAuth                         | Admin dashboard                                |
 | `GET`    | `/dashboard/documents/:slug`                     | Google OAuth                         | Document detail page                           |
 
-## Running and deployment
+## Development
 
 Local checks:
 
 ```bash
-npm install
+npm ci
 npm test
 npm run worker:check
 npm run worker:dry-run
 ```
 
-`npm test` runs the Node test suite; `worker:check` syntax-checks every Worker module; `worker:dry-run` bundles the Worker with Wrangler without deploying.
+`npm test` runs the Node test suite; `worker:check` syntax-checks every Worker module; `worker:dry-run` bundles the Worker with Wrangler without deploying. How `main` is deployed to Cloudflare is described under [Install on Cloudflare Workers](#install-on-cloudflare-workers).
 
 `node scripts/capture-dashboard.mjs docs/dashboard.png` regenerates the README dashboard screenshot from the local Worker with fabricated sample data; it needs the Playwright Chromium install.
 
-The `main` branch deploys to Cloudflare Workers through `.github/workflows/cloudflare-worker.yml`. A push that touches the workflow, the Worker sources, `wrangler.toml`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build, and the review-browser test against the built Worker before deploying with `wrangler@4.86.0`. Pull requests run the same checks but never deploy.
+## Node server behavior
 
-A push that changes `migrations/**` stops the automatic deploy; run the workflow manually with `apply_d1_migrations=true` to apply D1 migrations before deploying.
+The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides SQLite-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic. The steps to run it are in [Install on a Linux server with Node](#install-on-a-linux-server-with-node).
 
-## Self-hosting on Node
-
-The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides SQLite-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
-
-```
-npm ci
-PORT=3110 PAGES_DB_FILE=/var/lib/pages/pages.sqlite npm start   # node src/node/server.mjs
-```
-
-Configuration uses the Worker's variable names, read from the environment or from a `.env` file in the working directory (`PAGES_ENV_FILE` points elsewhere):
-
-| Variable | Description |
-|---|---|
-| `PAGES_API_TOKEN`, `SESSION_SECRET`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS` | Same meaning as for the Worker. All are required; the server refuses to start without them. |
-| `PORT` | Listening port (default `3110`). |
-| `HOST` | Listening address (default `127.0.0.1`). |
-| `PAGES_DB_FILE` | The SQLite database file (default `./data/pages.sqlite`); missing parent folders are created. |
-
-- All data, document records and uploaded files alike, lives in that one SQLite file (WAL mode). Back it up with `sqlite3 pages.sqlite ".backup copy.sqlite"`, or copy `pages.sqlite` together with its `-wal` and `-shm` files while the server is stopped. Uploaded files sit in the `node_bucket_objects` table, which the server creates itself.
+- All data, document records and uploaded files alike, lives in the one SQLite file (WAL mode). Uploaded files sit in the `node_bucket_objects` table, which the server creates itself.
 - On start the server applies the files in `migrations/` that are not yet applied, recorded in the `pages_migrations` table. Cloudflare's own migration table is not used.
 - Requests are handled as if they arrived at the origin of `BASE_URL`, so redirects and cookie attributes match the public address.
 - Run a single process: the change event stream (`/api/events`) lives inside the process.
-- Put an HTTPS reverse proxy in front. The session cookie is `Secure`, so signing in over plain `http://` on a local port does not work; use the proxy's HTTPS address as `BASE_URL`.
 - Data written by the earlier Express server (`PAGES_DIR` files, `pages-meta.sqlite`) is not read.
-
-`pm2 start ecosystem.config.js` runs the same entry point from `~/services/pages/current`; `ecosystem.config.js` sets `cwd` via `process.env.HOME`, so do not change it to a relative path.
 
 ## Migration helpers
 
