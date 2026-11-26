@@ -552,28 +552,27 @@ async function maybeServeDocumentRoute(request, env) {
   if (!latestAsset) return null;
   const slug = decodeURIComponent(latestAsset[1]);
   if (!isValidDocumentSlug(slug)) return notFound();
-  const documentRecord = await getDocument(env, slug);
-  if (!documentRecord?.revision) return notFound();
+  const latestRevId = await getLatestRevisionId(env, slug);
+  if (!latestRevId) return notFound();
   if (latestAsset[2] === undefined) {
     return redirect(`${url.origin}/d/${slug}/${url.search}`);
   }
-  return sendPageAsset(request, env, documentRecord.revision.revId, latestAsset[2] || "");
+  return sendPageAsset(request, env, latestRevId, latestAsset[2] || "");
 }
 
 async function sendPageAsset(request, env, pageId, assetPath = "", skipPrivateAuth = false) {
-  const meta = await readMeta(env, pageId);
+  // The asset lookup runs beside the meta read; its result is only used after the meta and privacy checks.
+  const [meta, assetResult] = await Promise.all([
+    readMeta(env, pageId),
+    getAsset(env, pageId, assetPath).then((asset) => ({ asset }), () => ({ failed: true })),
+  ]);
   if (!meta) return notFound();
   if (meta.private && !skipPrivateAuth) {
     const auth = await requireAuth(request, env);
     if (auth.response) return auth.response;
   }
-
-  let asset;
-  try {
-    asset = await getAsset(env, pageId, assetPath);
-  } catch {
-    return notFound();
-  }
+  if (assetResult.failed) return notFound();
+  const { asset } = assetResult;
 
   if (!asset && assetPath) return notFound();
   if (!asset) {
@@ -614,9 +613,12 @@ async function documentReadDenied(request, env, documentRecord) {
 
 async function getDocumentApi(request, env, slug) {
   if (!isValidDocumentSlug(slug)) return json({ error: "Not found" }, 404);
-  const documentRecord = await getDocument(env, slug);
-  if (!documentRecord) return json({ error: "Not found" }, 404);
-  const denied = await documentReadDenied(request, env, documentRecord);
+  const doc = await selectDocumentBySlug(env, normalizeSlug(slug));
+  if (!doc) return json({ error: "Not found" }, 404);
+  const [documentRecord, denied] = await Promise.all([
+    documentSnapshot(env, doc),
+    documentReadDenied(request, env, doc),
+  ]);
   if (denied) return denied;
   return json(formatDocumentResponse(documentRecord, env.BASE_URL));
 }
@@ -961,6 +963,16 @@ async function getDocument(env, slug) {
   return documentSnapshot(env, doc);
 }
 
+async function getLatestRevisionId(env, slug) {
+  const row = await env.PAGES_DB.prepare(`
+    SELECT r.rev_id
+    FROM documents d
+    JOIN revisions r ON r.rev_id = d.latest_revision AND r.doc_id = d.doc_id
+    WHERE d.slug = ?
+  `).bind(normalizeSlug(slug)).first();
+  return row ? row.rev_id : null;
+}
+
 async function getDocumentById(env, docId) {
   const row = await env.PAGES_DB.prepare(`
     SELECT doc_id, slug, title, owner, latest_revision, created_at, updated_at
@@ -1108,19 +1120,15 @@ async function replaceBundle(env, { revId, docId, entrypoint, files, createdAt }
 }
 
 async function getAsset(env, revId, requestPath) {
-  const bundle = await env.PAGES_DB.prepare(`
-    SELECT rev_id, entrypoint, file_count, total_size_bytes, created_at
-    FROM revision_bundles
-    WHERE rev_id = ?
-  `).bind(revId).first();
-  if (!bundle) return null;
-  const assetPath = requestPath ? normalizeBundlePath(requestPath) : bundle.entrypoint;
+  const assetPath = requestPath ? normalizeBundlePath(requestPath) : null;
   const row = await env.PAGES_DB.prepare(`
-    SELECT rev_id, path, bytes_key, content_type, size_bytes, created_at
-    FROM revision_assets
-    WHERE rev_id = ? AND path = ?
-  `).bind(revId, assetPath).first();
-  return row ? { ...formatAssetRow(row), isEntrypoint: assetPath === bundle.entrypoint } : null;
+    SELECT b.entrypoint, a.rev_id, a.path, a.bytes_key, a.content_type, a.size_bytes, a.created_at
+    FROM revision_bundles b
+    LEFT JOIN revision_assets a ON a.rev_id = b.rev_id AND a.path = COALESCE(?, b.entrypoint)
+    WHERE b.rev_id = ?
+  `).bind(assetPath, revId).first();
+  if (!row?.path) return null;
+  return { ...formatAssetRow(row), isEntrypoint: row.path === row.entrypoint };
 }
 
 function buildManifest({ revId, docId, entrypoint, files, createdAt }) {
