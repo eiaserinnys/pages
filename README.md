@@ -340,23 +340,6 @@ The `main` branch deploys to Cloudflare Workers through `.github/workflows/cloud
 
 A push that changes `migrations/**` stops the automatic deploy; run the workflow manually with `apply_d1_migrations=true` to apply D1 migrations before deploying.
 
-## Legacy Express server (not deployed)
+## Migration helpers
 
-The repository still contains the earlier Express implementation in `src/server.js`, with its dependencies in `package.json`. It is not deployed; `pages.eiaserinnys.me` is served by the Worker.
-
-The Express server ran with `npm start` (`node src/server.js`) or `pm2 start ecosystem.config.js`. `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system; do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
-
-It required the following environment variables:
-
-| Variable              | Description                                                    |
-|-----------------------|----------------------------------------------------------------|
-| `PORT`                | Port the server listens on (e.g. `3110`)                       |
-| `PAGES_DIR`           | Absolute path to the directory where pages are stored          |
-| `PAGES_API_TOKEN`     | Secret token required for `POST /api/pages`                    |
-| `SESSION_SECRET`      | Secret used to sign the session cookie                         |
-| `BASE_URL`            | Public base URL without trailing slash                         |
-| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 client ID                                     |
-| `GOOGLE_CLIENT_SECRET`| Google OAuth 2.0 client secret                                 |
-| `ALLOWED_EMAILS`      | Comma-separated list of Google email addresses allowed to log in |
-
-All of them were required; the server threw on startup when one was missing. Annotation metadata was stored as `pages-meta.sqlite` inside `PAGES_DIR`. The legacy server does not provide the review panel or the annotation append and reply endpoints. The one-time migration helpers remain in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).
+The one-time migration helpers live in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).

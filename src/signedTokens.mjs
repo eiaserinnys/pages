@@ -6,7 +6,7 @@ export function textDecode(value) {
   return new TextDecoder().decode(value);
 }
 
-function base64Encode(bytes) {
+export function base64Encode(bytes) {
   let binary = "";
   const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -15,7 +15,7 @@ function base64Encode(bytes) {
   return btoa(binary);
 }
 
-function base64Decode(value) {
+export function base64Decode(value) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
