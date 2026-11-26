@@ -1,16 +1,18 @@
+# Template. Deployment values are filled in by scripts/render_wrangler_config.mjs,
+# which writes wrangler.deploy.toml from PAGES_BASE_URL, PAGES_D1_DATABASE_ID,
+# PAGES_ROUTE_PATTERN and PAGES_ZONE_NAME. ALLOWED_EMAILS is a Worker secret.
 name = "pages-cloudflare"
 main = "src/worker.mjs"
 compatibility_date = "2026-06-17"
 workers_dev = true
 
 [vars]
-BASE_URL = "https://pages.eiaserinnys.me"
-ALLOWED_EMAILS = "eiaserinnys@gmail.com,eias@line.games"
+BASE_URL = "https://pages.example.com"
 
 [[d1_databases]]
 binding = "PAGES_DB"
 database_name = "pages"
-database_id = "af7049be-6ba5-4261-bc05-e5773d3eec33"
+database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
@@ -24,8 +26,3 @@ class_name = "PagesEvents"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PagesEvents"]
-
-[[routes]]
-pattern = "pages.eiaserinnys.me"
-zone_name = "eiaserinnys.me"
-custom_domain = true

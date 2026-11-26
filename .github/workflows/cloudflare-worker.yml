@@ -22,6 +22,7 @@ on:
       - "src/reviewClient.mjs"
       - "src/workerDashboard.mjs"
       - "wrangler.toml"
+      - "scripts/render_wrangler_config.mjs"
   pull_request:
     branches:
       - main
@@ -43,6 +44,7 @@ on:
       - "src/reviewClient.mjs"
       - "src/workerDashboard.mjs"
       - "wrangler.toml"
+      - "scripts/render_wrangler_config.mjs"
       - "client/**"
       - "scripts/build-encrypted-page.mjs"
       - "scripts/review-browser.mjs"
@@ -74,6 +76,24 @@ jobs:
 
       - run: npm ci
 
+      - name: Render wrangler.deploy.toml
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+          PAGES_D1_DATABASE_ID: ${{ vars.PAGES_D1_DATABASE_ID }}
+          PAGES_ROUTE_PATTERN: ${{ vars.PAGES_ROUTE_PATTERN }}
+          PAGES_ZONE_NAME: ${{ vars.PAGES_ZONE_NAME }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "pull_request" ] && { [ -z "$PAGES_BASE_URL" ] || [ -z "$PAGES_D1_DATABASE_ID" ]; }; then
+            echo "Repository variables are not available to this pull request; rendering example values for the dry-run."
+            export PAGES_BASE_URL=https://pages.example.com
+            export PAGES_D1_DATABASE_ID=00000000-0000-4000-8000-000000000000
+            export PAGES_ROUTE_PATTERN=pages.example.com
+            export PAGES_ZONE_NAME=example.com
+          fi
+          node scripts/render_wrangler_config.mjs
+
       - run: npm test
 
       - run: npx playwright install --with-deps chromium
@@ -91,11 +111,26 @@ jobs:
 
       - name: Apply D1 migrations
         if: github.event_name != 'pull_request' && github.event_name == 'workflow_dispatch' && inputs.apply_d1_migrations
-        run: npm run worker:migrate:d1
+        run: npm run worker:migrate:d1 -- --config wrangler.deploy.toml
 
-      - run: npm run worker:dry-run -- --outdir /tmp/pages-review-worker
+      - run: npm run worker:dry-run -- --config wrangler.deploy.toml --outdir /tmp/pages-review-worker
 
       - run: REVIEW_WORKER_MODULE=file:///tmp/pages-review-worker/worker.js npm run test:review-browser
 
-      - run: npx --yes wrangler@4.86.0 deploy
+      - name: Deploy with ALLOWED_EMAILS as a Worker secret
         if: github.event_name != 'pull_request'
+        env:
+          PAGES_ALLOWED_EMAILS: ${{ secrets.PAGES_ALLOWED_EMAILS }}
+        run: |
+          set -eu
+          umask 077
+          secrets_file="$RUNNER_TEMP/pages-worker-secrets.json"
+          trap 'rm -f "$secrets_file"' EXIT
+          node -e '
+          const value = (process.env.PAGES_ALLOWED_EMAILS || "").trim();
+          const addresses = value.split(",").map((s) => s.trim()).filter(Boolean);
+          if (!addresses.length) { console.error("Missing repository secret: PAGES_ALLOWED_EMAILS"); process.exit(1); }
+          for (const address of addresses) console.log("::add-mask::" + address);
+          require("fs").writeFileSync(process.argv[1], JSON.stringify({ ALLOWED_EMAILS: value }), { mode: 0o600 });
+          ' "$secrets_file"
+          npx --yes wrangler@4.86.0 deploy --config wrangler.deploy.toml --secrets-file "$secrets_file"
