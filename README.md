@@ -340,23 +340,33 @@ The `main` branch deploys to Cloudflare Workers through `.github/workflows/cloud
 
 A push that changes `migrations/**` stops the automatic deploy; run the workflow manually with `apply_d1_migrations=true` to apply D1 migrations before deploying.
 
-## Legacy Express server (not deployed)
+## Self-hosting on Node
 
-The repository still contains the earlier Express implementation in `src/server.js`, with its dependencies in `package.json`. It is not deployed; `pages.eiaserinnys.me` is served by the Worker.
+The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides SQLite-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
 
-The Express server ran with `npm start` (`node src/server.js`) or `pm2 start ecosystem.config.js`. `ecosystem.config.js` sets `cwd` via `process.env.HOME` to the symlink path managed by the deployment system; do not change this to a relative path — the symlink is stable and pm2's working directory at startup time is not.
+```
+npm ci
+PORT=3110 PAGES_DB_FILE=/var/lib/pages/pages.sqlite npm start   # node src/node/server.mjs
+```
 
-It required the following environment variables:
+Configuration uses the Worker's variable names, read from the environment or from a `.env` file in the working directory (`PAGES_ENV_FILE` points elsewhere):
 
-| Variable              | Description                                                    |
-|-----------------------|----------------------------------------------------------------|
-| `PORT`                | Port the server listens on (e.g. `3110`)                       |
-| `PAGES_DIR`           | Absolute path to the directory where pages are stored          |
-| `PAGES_API_TOKEN`     | Secret token required for `POST /api/pages`                    |
-| `SESSION_SECRET`      | Secret used to sign the session cookie                         |
-| `BASE_URL`            | Public base URL without trailing slash                         |
-| `GOOGLE_CLIENT_ID`    | Google OAuth 2.0 client ID                                     |
-| `GOOGLE_CLIENT_SECRET`| Google OAuth 2.0 client secret                                 |
-| `ALLOWED_EMAILS`      | Comma-separated list of Google email addresses allowed to log in |
+| Variable | Description |
+|---|---|
+| `PAGES_API_TOKEN`, `SESSION_SECRET`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS` | Same meaning as for the Worker. All are required; the server refuses to start without them. |
+| `PORT` | Listening port (default `3110`). |
+| `HOST` | Listening address (default `127.0.0.1`). |
+| `PAGES_DB_FILE` | The SQLite database file (default `./data/pages.sqlite`); missing parent folders are created. |
 
-All of them were required; the server threw on startup when one was missing. Annotation metadata was stored as `pages-meta.sqlite` inside `PAGES_DIR`. The legacy server does not provide the review panel or the annotation append and reply endpoints. The one-time migration helpers remain in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).
+- All data, document records and uploaded files alike, lives in that one SQLite file (WAL mode). Back it up with `sqlite3 pages.sqlite ".backup copy.sqlite"`, or copy `pages.sqlite` together with its `-wal` and `-shm` files while the server is stopped. Uploaded files sit in the `node_bucket_objects` table, which the server creates itself.
+- On start the server applies the files in `migrations/` that are not yet applied, recorded in the `pages_migrations` table. Cloudflare's own migration table is not used.
+- Requests are handled as if they arrived at the origin of `BASE_URL`, so redirects and cookie attributes match the public address.
+- Run a single process: the change event stream (`/api/events`) lives inside the process.
+- Put an HTTPS reverse proxy in front. The session cookie is `Secure`, so signing in over plain `http://` on a local port does not work; use the proxy's HTTPS address as `BASE_URL`.
+- Data written by the earlier Express server (`PAGES_DIR` files, `pages-meta.sqlite`) is not read.
+
+`pm2 start ecosystem.config.js` runs the same entry point from `~/services/pages/current`; `ecosystem.config.js` sets `cwd` via `process.env.HOME`, so do not change it to a relative path.
+
+## Migration helpers
+
+The one-time migration helpers live in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).

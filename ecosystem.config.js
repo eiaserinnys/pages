@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'pages',
-      script: './src/server.js',
+      script: './src/node/server.mjs',
       cwd: `${process.env.HOME}/services/pages/current`,
       autorestart: true,
       max_restarts: 10,

@@ -1,44 +1,9 @@
 import { DASHBOARD_HTML_PREVIEW_BYTES } from '../../src/workerDashboard.mjs';
-import Database from 'better-sqlite3';
+import { createD1, openDatabase } from '../../src/node/d1.mjs';
+import { createSqliteBucket } from '../../src/node/r2.mjs';
+
 function createDatabase() {
-  const database = new Database(':memory:');
-  database.exec(`
-    CREATE TABLE documents (
-      doc_id TEXT PRIMARY KEY, slug TEXT UNIQUE, title TEXT NOT NULL, owner TEXT NOT NULL,
-      latest_revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    );
-    CREATE TABLE revisions (
-      rev_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, rev_number INTEGER NOT NULL,
-      status TEXT NOT NULL, created_at TEXT NOT NULL
-    );
-    CREATE TABLE comments (
-      comment_id TEXT PRIMARY KEY, rev_id TEXT NOT NULL, anchor TEXT NOT NULL,
-      body TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL,
-      resolved INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL
-    );
-    CREATE TABLE webhook_secrets (
-      rev_id TEXT PRIMARY KEY, secret TEXT NOT NULL
-    );
-    CREATE TABLE revision_bundles (
-      rev_id TEXT PRIMARY KEY, entrypoint TEXT NOT NULL, file_count INTEGER NOT NULL DEFAULT 0,
-      total_size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT ''
-    );
-    CREATE TABLE revision_assets (
-      rev_id TEXT NOT NULL, path TEXT NOT NULL, bytes_key TEXT NOT NULL,
-      content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-      size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY (rev_id, path)
-    );
-    CREATE TABLE document_state (
-      doc_id TEXT PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
-      salt TEXT NOT NULL, iter INTEGER NOT NULL, verifier TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 0, blob TEXT, updated_at TEXT
-    );
-    CREATE TABLE oauth_used_codes (
-      jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
-    );
-  `);
-  return database;
+  return openDatabase(':memory:');
 }
 
 function seedDatabase(database) {
@@ -60,12 +25,15 @@ function seedDatabase(database) {
   insertComment.run('comment-1', 'aaa111aaa111', '{}', 'One', 'tester', '2026-07-20T05:01:00Z', 0, '{"id":"comment-1","body":"One"}', '2026-07-20T05:01:00Z');
   insertComment.run('comment-2', 'aaa111aaa111', '{}', 'Two', 'tester', '2026-07-20T05:02:00Z', 0, '{"id":"comment-2","body":"Two"}', '2026-07-20T05:02:00Z');
   insertComment.run('comment-page', 'ccc333ccc333', '{}', 'Page note', 'tester', '2026-07-20T06:01:00Z', 0, '{"id":"comment-page","body":"Page note"}', '2026-07-20T06:01:00Z');
-  database.prepare('INSERT INTO webhook_secrets VALUES (?, ?)').run('ccc333ccc333', 'secret');
-  database.prepare('INSERT INTO revision_bundles (rev_id, entrypoint) VALUES (?, ?)').run('ccc333ccc333', 'index.html');
-  database.prepare('INSERT INTO revision_assets (rev_id, path, bytes_key) VALUES (?, ?, ?)').run(
+  database.prepare('INSERT INTO webhook_secrets VALUES (?, ?, ?, ?, ?)').run('ccc333ccc333', 'secret', 'secret-hash', '2026-07-20T06:00:00Z', '2026-07-20T06:00:00Z');
+  database.prepare('INSERT INTO revision_bundles VALUES (?, ?, ?, ?, ?)').run('ccc333ccc333', 'index.html', 1, 0, '2026-07-20T06:00:00Z');
+  database.prepare('INSERT INTO revision_assets VALUES (?, ?, ?, ?, ?, ?)').run(
     'ccc333ccc333',
     'chart.svg',
     'assets/ccc333ccc333/chart.svg',
+    'image/svg+xml',
+    0,
+    '2026-07-20T06:00:00Z',
   );
 }
 
@@ -82,66 +50,37 @@ function seedBucket(bucket) {
   bucket.putText('assets/ccc333ccc333/chart.svg', '<svg></svg>');
 }
 
-function d1(database) {
-  return {
-    prepare(sql) {
-      let values = [];
-      const statement = {
-        bind(...nextValues) { values = nextValues; return this; },
-        async first() { return database.prepare(sql).get(...values) || null; },
-        async all() { return { results: database.prepare(sql).all(...values) }; },
-        async run() { return { success: true, meta: database.prepare(sql).run(...values) }; },
-        _run() { return { success: true, meta: database.prepare(sql).run(...values) }; },
-      };
-      return statement;
-    },
-    async batch(statements) {
-      const execute = database.transaction(() => statements.map((statement) => statement._run()));
-      return execute();
-    },
-  };
+function contentTypeFor(key) {
+  if (key.endsWith('.html')) return 'text/html; charset=utf-8';
+  if (key.endsWith('.json')) return 'application/json; charset=utf-8';
+  return undefined;
 }
 
-function createBucket() {
-  const values = new Map();
+// The real SQLite bucket (in memory unless a database is given), plus call logs and seeding helpers for tests.
+function createBucket(database = createDatabase()) {
+  const files = createSqliteBucket(database);
+  const seed = (key, text) => files.putSync(key, text, { httpMetadata: { contentType: contentTypeFor(key) } });
   return {
     reads: [],
     deletes: [],
     puts: [],
-    putJson(key, value) { values.set(key, new TextEncoder().encode(JSON.stringify(value))); },
-    putText(key, value) { values.set(key, new TextEncoder().encode(value)); },
+    putJson(key, value) { seed(key, JSON.stringify(value)); },
+    putText(key, value) { seed(key, value); },
     async put(key, value, options) {
-      const bytes = typeof value === 'string'
-        ? new TextEncoder().encode(value)
-        : value instanceof ArrayBuffer
-          ? new Uint8Array(value)
-          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       this.puts.push({ key, options });
-      values.set(key, bytes);
+      return files.put(key, value, options);
     },
     async get(key, options) {
       this.reads.push({ key, options });
-      const stored = values.get(key);
-      if (!stored) return null;
-      const range = options?.range;
-      const bytes = range ? stored.slice(range.offset, range.offset + range.length) : stored;
-      return {
-        body: bytes,
-        size: bytes.byteLength,
-        httpMetadata: { contentType: key.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8' },
-        async text() { return new TextDecoder().decode(bytes); },
-        async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
-      };
+      return files.get(key, options);
     },
-    async delete(key) {
-      const keys = Array.isArray(key) ? key : [key];
-      for (const value of keys) {
-        this.deletes.push(value);
-        values.delete(value);
-      }
+    async delete(keys) {
+      this.deletes.push(...(Array.isArray(keys) ? keys : [keys]));
+      return files.delete(keys);
     },
   };
 }
 
+const d1 = createD1;
 
 export { createDatabase, createBucket, d1, seedDatabase, seedBucket };
