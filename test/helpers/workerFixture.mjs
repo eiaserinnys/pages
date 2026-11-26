@@ -1,9 +1,6 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { DASHBOARD_HTML_PREVIEW_BYTES } from '../../src/workerDashboard.mjs';
 import { createD1, openDatabase } from '../../src/node/d1.mjs';
-import { createFileBucket } from '../../src/node/r2.mjs';
+import { createSqliteBucket } from '../../src/node/r2.mjs';
 
 function createDatabase() {
   return openDatabase(':memory:');
@@ -59,11 +56,9 @@ function contentTypeFor(key) {
   return undefined;
 }
 
-// The real file-backed bucket in a temp folder, plus call logs and seeding helpers for tests.
-function createBucket() {
-  const root = mkdtempSync(join(tmpdir(), 'pages-bucket-'));
-  process.once('exit', () => rmSync(root, { recursive: true, force: true }));
-  const files = createFileBucket(root);
+// The real SQLite bucket (in memory unless a database is given), plus call logs and seeding helpers for tests.
+function createBucket(database = createDatabase()) {
+  const files = createSqliteBucket(database);
   const seed = (key, text) => files.putSync(key, text, { httpMetadata: { contentType: contentTypeFor(key) } });
   return {
     reads: [],

@@ -9,8 +9,8 @@ import { createNodeBindings } from './bindings.mjs';
 
 const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
 
-export function createPagesServer({ env: configEnv, dataDir }) {
-  const bindings = createNodeBindings({ dataDir });
+export function createPagesServer({ env: configEnv, dbFile }) {
+  const bindings = createNodeBindings({ dbFile });
   const env = { ...configEnv, ...bindings.env };
   assertRequiredEnv(env);
   const origin = new URL(env.BASE_URL).origin;
@@ -66,14 +66,14 @@ function readConfig(processEnv) {
     env: { ...process.env },
     port: Number(process.env.PORT || 3110),
     host: process.env.HOST || '127.0.0.1',
-    dataDir: resolve(process.env.PAGES_DATA_DIR || 'data'),
+    dbFile: resolve(process.env.PAGES_DB_FILE || 'data/pages.sqlite'),
   };
 }
 
 async function main() {
-  const { env, port, host, dataDir } = readConfig(process.env);
-  const server = createPagesServer({ env, dataDir });
-  server.listen(port, host, () => console.log(`[pages-node] listening on http://${host}:${port} (data: ${dataDir})`));
+  const { env, port, host, dbFile } = readConfig(process.env);
+  const server = createPagesServer({ env, dbFile });
+  server.listen(port, host, () => console.log(`[pages-node] listening on http://${host}:${port} (database: ${dbFile})`));
   const stop = () => {
     server.close(() => process.exit(0));
     server.closeAllConnections();

@@ -5,7 +5,7 @@ import { createDatabase, createBucket, d1, seedDatabase, seedBucket } from '../t
 
 // Browser requests exercise the real Worker and SQLite through the D1 adapter.
 const database = createDatabase();
-const bucket = createBucket();
+const bucket = createBucket(database);
 seedDatabase(database); seedBucket(bucket);
 const env = { PAGES_DB: d1(database), PAGES_BUCKET: bucket, PAGES_API_TOKEN: 'test-token',
   SESSION_SECRET: 'secret', BASE_URL: 'https://pages.example.test', GOOGLE_CLIENT_ID: 'client',

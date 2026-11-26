@@ -342,11 +342,11 @@ A push that changes `migrations/**` stops the automatic deploy; run the workflow
 
 ## Self-hosting on Node
 
-The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides file-backed stand-ins for the bindings the Worker uses (`PAGES_DB` on SQLite through `better-sqlite3`, `PAGES_BUCKET` on a data folder, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
+The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides file-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
 
 ```
 npm ci
-PORT=3110 PAGES_DATA_DIR=/var/lib/pages npm start   # node src/node/server.mjs
+PORT=3110 PAGES_DB_FILE=/var/lib/pages/pages.sqlite npm start   # node src/node/server.mjs
 ```
 
 Configuration uses the Worker's variable names, read from the environment or from a `.env` file in the working directory (`PAGES_ENV_FILE` points elsewhere):
@@ -356,8 +356,9 @@ Configuration uses the Worker's variable names, read from the environment or fro
 | `PAGES_API_TOKEN`, `SESSION_SECRET`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS` | Same meaning as for the Worker. All are required; the server refuses to start without them. |
 | `PORT` | Listening port (default `3110`). |
 | `HOST` | Listening address (default `127.0.0.1`). |
-| `PAGES_DATA_DIR` | Data folder (default `./data`): `pages.sqlite` (WAL) and `files/` for stored objects. |
+| `PAGES_DB_FILE` | The SQLite database file (default `./data/pages.sqlite`); missing parent folders are created. |
 
+- All data, document records and uploaded files alike, lives in that one SQLite file (WAL mode). Back it up with `sqlite3 pages.sqlite ".backup copy.sqlite"`, or copy `pages.sqlite` together with its `-wal` and `-shm` files while the server is stopped. Uploaded files sit in the `node_bucket_objects` table, which the server creates itself.
 - On start the server applies the files in `migrations/` that are not yet applied, recorded in the `pages_migrations` table. Cloudflare's own migration table is not used.
 - Requests are handled as if they arrived at the origin of `BASE_URL`, so redirects and cookie attributes match the public address.
 - Run a single process: the change event stream (`/api/events`) lives inside the process.

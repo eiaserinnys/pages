@@ -5,6 +5,8 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { openDatabase } from '../src/node/d1.mjs';
+import { createSqliteBucket } from '../src/node/r2.mjs';
 import { createPagesServer } from '../src/node/server.mjs';
 
 function freePort() {
@@ -18,9 +20,9 @@ function freePort() {
   });
 }
 
-async function start(dataDir, port) {
+async function start(dbFile, port) {
   const server = createPagesServer({
-    dataDir,
+    dbFile,
     env: {
       PAGES_API_TOKEN: 'token',
       SESSION_SECRET: 'secret',
@@ -36,11 +38,12 @@ async function start(dataDir, port) {
 }
 
 test('self-hosted Node server uploads, serves, and keeps documents across restarts', { timeout: 60_000 }, async (t) => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'pages-node-'));
-  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), 'pages-node-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbFile = join(dir, 'data', 'pages.sqlite');
   const port = await freePort();
 
-  let running = await start(dataDir, port);
+  let running = await start(dbFile, port);
   t.after(() => running.stop());
   const upload = await fetch(`${running.base}/api/pages`, {
     method: 'POST',
@@ -72,14 +75,15 @@ test('self-hosted Node server uploads, serves, and keeps documents across restar
   assert.equal(unauthorized.status, 401);
 
   await running.stop();
-  running = await start(dataDir, await freePort());
+  running = await start(dbFile, await freePort());
   await verify();
 });
 
 test('self-hosted Node server streams change events to a signed-in dashboard', { timeout: 60_000 }, async (t) => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'pages-node-'));
-  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const running = await start(dataDir, await freePort());
+  const dir = mkdtempSync(join(tmpdir(), 'pages-node-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbFile = join(dir, 'data', 'pages.sqlite');
+  const running = await start(dbFile, await freePort());
   t.after(() => running.stop());
 
   const payload = Buffer.from(JSON.stringify({ email: 'tester@example.com', exp: Math.floor(Date.now() / 1000) + 60 })).toString('base64url');
@@ -105,4 +109,35 @@ test('self-hosted Node server streams change events to a signed-in dashboard', {
     text += decoder.decode(value, { stream: true });
   }
   assert.match(text, /event: document_updated\ndata: {"type":"document_updated","id":"event-doc"}/);
+});
+
+test('SQLite bucket reads ranges, keeps content types, overwrites, and deletes arrays', { timeout: 60_000 }, async (t) => {
+  const database = openDatabase(':memory:');
+  t.after(() => database.close());
+  const bucket = createSqliteBucket(database);
+
+  await bucket.put('a/one.html', '0123456789', { httpMetadata: { contentType: 'text/html; charset=utf-8' } });
+  await bucket.put('two.bin', new Uint8Array([1, 2, 3]));
+
+  const whole = await bucket.get('a/one.html');
+  assert.equal(await whole.text(), '0123456789');
+  assert.equal(whole.size, 10);
+  assert.equal(whole.httpMetadata.contentType, 'text/html; charset=utf-8');
+  assert.equal(await new Response(whole.body).text(), '0123456789');
+
+  const part = await bucket.get('a/one.html', { range: { offset: 2, length: 3 } });
+  assert.equal(await part.text(), '234');
+  assert.equal(part.size, 10);
+  assert.deepEqual(part.range, { offset: 2, length: 3 });
+  assert.equal(await (await bucket.get('a/one.html', { range: { suffix: 4 } })).text(), '6789');
+  assert.equal(await (await bucket.get('a/one.html', { range: { offset: 8, length: 99 } })).text(), '89');
+
+  assert.equal((await bucket.get('two.bin')).httpMetadata.contentType, undefined);
+  assert.deepEqual(new Uint8Array(await (await bucket.get('two.bin')).arrayBuffer()), new Uint8Array([1, 2, 3]));
+
+  await bucket.put('a/one.html', 'replaced');
+  assert.equal(await (await bucket.get('a/one.html')).text(), 'replaced');
+  await bucket.delete(['a/one.html', 'two.bin']);
+  assert.equal(await bucket.get('a/one.html'), null);
+  assert.equal(await bucket.get('two.bin'), null);
 });

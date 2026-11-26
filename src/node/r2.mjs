@@ -1,21 +1,32 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+// R2-shaped object store in one SQLite table next to the D1 tables: get (with range), put (keeps httpMetadata.contentType), delete (key or array).
+export function createSqliteBucket(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS node_bucket_objects (
+      key TEXT PRIMARY KEY,
+      body BLOB NOT NULL,
+      content_type TEXT,
+      size INTEGER NOT NULL,
+      uploaded_at TEXT NOT NULL
+    )
+  `);
+  const selectWhole = database.prepare('SELECT content_type, size, body FROM node_bucket_objects WHERE key = ?');
+  const selectPart = database.prepare('SELECT content_type, size, substr(body, ?, ?) AS body FROM node_bucket_objects WHERE key = ?');
+  const selectSuffix = database.prepare('SELECT content_type, size, substr(body, max(size - ?, 0) + 1) AS body FROM node_bucket_objects WHERE key = ?');
+  const upsert = database.prepare(`
+    INSERT INTO node_bucket_objects (key, body, content_type, size, uploaded_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET body = excluded.body, content_type = excluded.content_type,
+      size = excluded.size, uploaded_at = excluded.uploaded_at
+  `);
+  const remove = database.prepare('DELETE FROM node_bucket_objects WHERE key = ?');
 
-// R2-shaped object store on the file system: get (with range), put (keeps httpMetadata.contentType), delete (key or array).
-export function createFileBucket(rootDir) {
-  const objectsDir = resolve(rootDir, 'objects');
-  const metaDir = resolve(rootDir, 'meta');
-
-  function locate(key) {
-    if (typeof key !== 'string' || !key) throw new Error('object key must be a non-empty string');
-    const file = resolve(objectsDir, key);
-    if (!file.startsWith(objectsDir + sep)) throw new Error(`object key leaves the data folder: ${key}`);
-    return { file, metaFile: resolve(metaDir, `${key}.json`) };
+  function read(key, range) {
+    if (!range) return selectWhole.get(key);
+    if (Number.isInteger(range.suffix)) return selectSuffix.get(range.suffix, key);
+    const offset = range.offset ?? 0;
+    return selectPart.get(offset + 1, range.length ?? -1, key);
   }
 
-  function encode(key, value, options) {
-    const { file, metaFile } = locate(key);
+  function putSync(key, value, options) {
     const bytes = typeof value === 'string'
       ? Buffer.from(value, 'utf8')
       : value instanceof ArrayBuffer
@@ -24,63 +35,41 @@ export function createFileBucket(rootDir) {
           ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
           : null;
     if (!bytes) throw new Error('object value must be a string, ArrayBuffer, or typed array');
-    const contentType = options?.httpMetadata?.contentType;
-    return { file, metaFile, bytes, metaJson: contentType ? JSON.stringify({ contentType }) : null };
+    upsert.run(key, bytes, options?.httpMetadata?.contentType ?? null, bytes.byteLength, new Date().toISOString());
   }
 
   return {
     async get(key, options) {
-      const { file, metaFile } = locate(key);
-      let data;
-      try {
-        data = await readFile(file);
-      } catch (error) {
-        if (['ENOENT', 'EISDIR', 'ENOTDIR'].includes(error.code)) return null;
-        throw error;
-      }
-      const contentType = await readFile(metaFile, 'utf8').then((text) => JSON.parse(text).contentType, () => undefined);
-      const range = options?.range;
-      const part = range ? data.subarray(range.offset, range.offset + range.length) : data;
-      const bytes = new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+      const row = read(key, options?.range);
+      if (!row) return null;
+      const bytes = new Uint8Array(row.body.buffer, row.body.byteOffset, row.body.byteLength);
       return {
         key,
-        body: bytes,
-        size: data.byteLength,
-        httpMetadata: { contentType },
+        body: new ReadableStream({
+          start(controller) {
+            if (bytes.byteLength) controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+        size: row.size,
+        httpMetadata: { contentType: row.content_type ?? undefined },
+        ...(options?.range ? { range: options.range } : {}),
         async text() { return new TextDecoder().decode(bytes); },
         async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
       };
     },
 
     async put(key, value, options) {
-      const { file, metaFile, bytes, metaJson } = encode(key, value, options);
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, bytes);
-      if (metaJson) {
-        await mkdir(dirname(metaFile), { recursive: true });
-        await writeFile(metaFile, metaJson);
-      } else {
-        await rm(metaFile, { force: true });
-      }
+      putSync(key, value, options);
     },
 
     // Synchronous put for test seeding.
-    putSync(key, value, options) {
-      const { file, metaFile, bytes, metaJson } = encode(key, value, options);
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, bytes);
-      if (metaJson) {
-        mkdirSync(dirname(metaFile), { recursive: true });
-        writeFileSync(metaFile, metaJson);
-      }
-    },
+    putSync,
 
     async delete(keys) {
-      for (const key of Array.isArray(keys) ? keys : [keys]) {
-        const { file, metaFile } = locate(key);
-        await rm(file, { force: true });
-        await rm(metaFile, { force: true });
-      }
+      database.transaction(() => {
+        for (const key of Array.isArray(keys) ? keys : [keys]) remove.run(key);
+      })();
     },
   };
 }
