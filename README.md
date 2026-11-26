@@ -342,7 +342,7 @@ A push that changes `migrations/**` stops the automatic deploy; run the workflow
 
 ## Self-hosting on Node
 
-The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides file-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
+The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a thin entry point: it turns `node:http` requests into `Request`s for `src/worker.mjs`, and provides SQLite-backed stand-ins for the bindings the Worker uses (`PAGES_DB` and `PAGES_BUCKET` both on one SQLite file through `better-sqlite3`, `PAGES_EVENTS` in memory). There is no second implementation of the upload, document, review or dashboard logic.
 
 ```
 npm ci
