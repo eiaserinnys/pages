@@ -254,7 +254,7 @@ async function routeRequest(request, env, ctx) {
   return notFound();
 }
 
-function assertRequiredEnv(env) {
+export function assertRequiredEnv(env) {
   for (const key of [
     "PAGES_BUCKET",
     "PAGES_DB",

@@ -369,7 +369,7 @@ test('review UI reaches old and bundled revisions, refreshes tokens, and appends
     assert.ok(Date.parse(config.expiresAt) > Date.now());
     assert.equal(Number(response.headers.get('content-length')), Buffer.byteLength(html));
   }
-  database.prepare('INSERT INTO revision_assets (rev_id,path,bytes_key,content_type) VALUES (?,?,?,?)').run('ccc333ccc333','index.html','bundle/index.html','text/html; charset=utf-8');
+  database.prepare('INSERT INTO revision_assets VALUES (?,?,?,?,?,?)').run('ccc333ccc333','index.html','bundle/index.html','text/html; charset=utf-8',0,'2026-07-20T06:00:00Z');
   bucket.putText('bundle/index.html','<html><body>Bundle</body></html>');
   bucket.putJson('pages/ccc333ccc333.json',{id:'ccc333ccc333',reviewable:true});
   for (const path of ['/p/ccc333ccc333/', '/p/ccc333ccc333/index.html']) {

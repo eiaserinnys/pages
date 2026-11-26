@@ -2,7 +2,9 @@
   "name": "pages",
   "version": "1.0.0",
   "description": "Lightweight HTML report hosting service",
+  "main": "src/node/server.mjs",
   "scripts": {
+    "start": "node src/node/server.mjs",
     "worker:check": "node --check src/worker.mjs && node --check src/docState.mjs && node --check src/oauthProvider.mjs && node --check src/signedTokens.mjs && node --check src/vtuberLive.mjs && node --check src/workerDashboard.mjs && node --check src/dashboard.js && node --check src/dashboardClient.js && node --check src/dashboardData.js && node --check src/dashboardStyles.js && node --check src/reviewClient.mjs",
     "worker:dry-run": "npx --yes wrangler@4.86.0 deploy --dry-run",
     "worker:migrate:d1": "npx --yes wrangler@4.86.0 d1 migrations apply pages --remote",
@@ -11,11 +13,13 @@
     "test": "node --test",
     "test:review-browser": "node scripts/review-browser.mjs"
   },
+  "dependencies": {
+    "better-sqlite3": "^12.10.1"
+  },
   "allowScripts": {
     "better-sqlite3@12.10.1": true
   },
   "devDependencies": {
-    "better-sqlite3": "^12.10.1",
     "playwright": "1.63.0"
   }
 }

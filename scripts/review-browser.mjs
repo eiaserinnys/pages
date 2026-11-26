@@ -97,9 +97,9 @@ try {
   }
   // A bundled iframe gets its own anchor scope even when its text matches the parent.
   database.prepare('DELETE FROM comments').run();
-  database.prepare('INSERT INTO revision_bundles (rev_id,entrypoint) VALUES (?,?)').run('aaa111aaa111','index.html');
-  const assetInsert=database.prepare('INSERT INTO revision_assets (rev_id,path,bytes_key,content_type) VALUES (?,?,?,?)');
-  for(const path of ['index.html','frame.html']) assetInsert.run('aaa111aaa111',path,'assets/inline/'+path,'text/html');
+  database.prepare('INSERT INTO revision_bundles VALUES (?,?,?,?,?)').run('aaa111aaa111','index.html',2,0,'2026-07-20T05:00:00Z');
+  const assetInsert=database.prepare('INSERT INTO revision_assets VALUES (?,?,?,?,?,?)');
+  for(const path of ['index.html','frame.html']) assetInsert.run('aaa111aaa111',path,'assets/inline/'+path,'text/html',0,'2026-07-20T05:00:00Z');
   bucket.putText('assets/inline/index.html','<html><body><p id="same">Same phrase</p><iframe src="frame.html" style="width:600px;height:400px"></iframe></body></html>');
   bucket.putText('assets/inline/frame.html','<html><body><p id="same">Same phrase</p></body></html>');
   const context=await browser.newContext();
