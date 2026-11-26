@@ -18,9 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DATABASE_ID = "af7049be-6ba5-4261-bc05-e5773d3eec33"
 DEFAULT_BUCKET = "pages-content"
-DEFAULT_SOURCE_DIR = "/home/eias/services/pages/shared/pages"
 TABLES = [
     ("documents", ["doc_id", "slug", "title", "owner", "latest_revision", "created_at", "updated_at"]),
     ("revisions", ["rev_id", "doc_id", "rev_number", "status", "created_at"]),
@@ -246,8 +244,8 @@ def migrate_r2_files(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate pages Express data to Cloudflare D1/R2.")
-    parser.add_argument("--source-dir", type=Path, default=Path(os.getenv("PAGES_SOURCE_DIR", DEFAULT_SOURCE_DIR)))
-    parser.add_argument("--database-id", default=os.getenv("PAGES_D1_DATABASE_ID", DEFAULT_DATABASE_ID))
+    parser.add_argument("--source-dir", type=Path, default=os.getenv("PAGES_SOURCE_DIR") or None)
+    parser.add_argument("--database-id", default=os.getenv("PAGES_D1_DATABASE_ID") or None)
     parser.add_argument("--bucket", default=os.getenv("PAGES_R2_BUCKET", DEFAULT_BUCKET))
     parser.add_argument("--migrations-dir", type=Path, default=Path("migrations"))
     parser.add_argument("--apply-schema", action="store_true")
@@ -259,10 +257,15 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    source_dir = args.source_dir
+    if args.source_dir is None:
+        raise SystemExit("Missing source directory: pass --source-dir or set PAGES_SOURCE_DIR")
+    source_dir = Path(args.source_dir)
     db_path = source_dir / "pages-meta.sqlite"
     if not db_path.exists():
         raise SystemExit(f"Missing SQLite metadata DB: {db_path}")
+
+    if not args.skip_d1 and not args.database_id:
+        raise SystemExit("Missing D1 database id: pass --database-id or set PAGES_D1_DATABASE_ID")
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:

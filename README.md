@@ -217,38 +217,49 @@ npx --yes wrangler@4.86.0 d1 create pages
 npx --yes wrangler@4.86.0 r2 bucket create pages-content
 ```
 
-`d1 create` prints the new `database_id`. If Wrangler offers to add the database to `wrangler.toml`, answer no; the binding is already there and you edit it in the next step.
+`d1 create` prints the new `database_id`. If Wrangler offers to add the database to `wrangler.toml`, answer no; the binding is already there and you pass the id in the next step.
 
-**3. Make `wrangler.toml` yours.** The file describes the author's deployment ([This repository's deployment](#this-repositorys-deployment) lists it). Change:
+**3. Render your deploy config.** `wrangler.toml` is a template with example values. Set the four `PAGES_*` values and let `scripts/render_wrangler_config.mjs` write `wrangler.deploy.toml` from it (git ignores that file):
 
-- `database_id` under `[[d1_databases]]` to the id from step 2. Keep `database_name = "pages"`; `npm run worker:migrate:d1` applies the migrations to the database of that name. If you named the bucket differently, change `bucket_name` under `[[r2_buckets]]`.
-- `BASE_URL` and `ALLOWED_EMAILS` under `[vars]`.
-- The `[[routes]]` block. To serve from your own domain, set `pattern` to the domain and `zone_name` to its Cloudflare zone (the zone must be in your account). To use only the `workers.dev` address, delete the whole block (`workers_dev = true` stays). The `workers.dev` address is `https://pages-cloudflare.<your-subdomain>.workers.dev`; you see it in step 5 and then put it in `BASE_URL`.
+```bash
+export PAGES_BASE_URL=https://pages.example.com
+export PAGES_D1_DATABASE_ID=<database_id from step 2>
+export PAGES_ROUTE_PATTERN=pages.example.com
+export PAGES_ZONE_NAME=example.com
+node scripts/render_wrangler_config.mjs
+```
+
+- `PAGES_BASE_URL` becomes `BASE_URL` under `[vars]` (no trailing slash).
+- `PAGES_D1_DATABASE_ID` becomes `database_id` under `[[d1_databases]]`. Keep `database_name = "pages"` in `wrangler.toml`; `npm run worker:migrate:d1` applies the migrations to the database of that name. If you named the bucket differently, change `bucket_name` under `[[r2_buckets]]` in `wrangler.toml` before rendering.
+- `PAGES_ROUTE_PATTERN` and `PAGES_ZONE_NAME` add a custom domain route: the domain and its Cloudflare zone (the zone must be in your account). To use only the `workers.dev` address, leave both unset and set `PAGES_BASE_URL` to `https://pages-cloudflare.<your-subdomain>.workers.dev` (the Cloudflare dashboard shows your `workers.dev` subdomain under *Workers & Pages*). The script stops with the missing names if a value is absent, or if `PAGES_BASE_URL` is not on `workers.dev` and there is no route.
+
+`ALLOWED_EMAILS` is not in the config; it is a Worker secret (step 6).
 
 **4. Apply the database migrations** (`npm run` needs no `npm install`; it only calls Wrangler):
 
 ```bash
-npm run worker:migrate:d1
+npm run worker:migrate:d1 -- --config wrangler.deploy.toml
 ```
 
 **5. Deploy:**
 
 ```bash
-npx --yes wrangler@4.86.0 deploy
+npx --yes wrangler@4.86.0 deploy --config wrangler.deploy.toml
 ```
 
-Wrangler prints the Worker's URL. If you use `workers.dev`, set `BASE_URL` in `wrangler.toml` to it and run the deploy again.
+Wrangler prints the Worker's URL. If it differs from `PAGES_BASE_URL`, render again with the printed address and deploy again.
 
-**6. Set the four secrets.** Each command asks for the value. Use `openssl rand -hex 32` for `PAGES_API_TOKEN` and `SESSION_SECRET`, and the client ID and secret from [Before you start](#before-you-start) for the Google values:
+**6. Set the five secrets.** Each command asks for the value. Use `openssl rand -hex 32` for `PAGES_API_TOKEN` and `SESSION_SECRET`, the client ID and secret from [Before you start](#before-you-start) for the Google values, and the comma-separated accounts for `ALLOWED_EMAILS`:
 
 ```bash
 npx --yes wrangler@4.86.0 secret put PAGES_API_TOKEN
 npx --yes wrangler@4.86.0 secret put SESSION_SECRET
 npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_ID
 npx --yes wrangler@4.86.0 secret put GOOGLE_CLIENT_SECRET
+npx --yes wrangler@4.86.0 secret put ALLOWED_EMAILS
 ```
 
-If the four values are in a dotenv file, `npm run worker:set-secrets -- --source-env <file>` sets all of them (it needs `python3`; without `--source-env` it reads the same names from the environment). Secrets survive later deploys. Until all four exist, every request answers `500`.
+If the five values are in a dotenv file, `npm run worker:set-secrets -- --source-env <file>` sets all of them (it needs `python3`; without `--source-env` it reads the same names from the environment). Secrets survive later deploys. Until all five exist, every request answers `500`.
 
 **7. Add the redirect URI** `<BASE_URL>/auth/google/callback` to the Google OAuth client if you have not yet (with `workers.dev`, this is the first time you know the address). Then upload a document and open `<BASE_URL>/` to sign in:
 
@@ -260,13 +271,13 @@ curl -sS -X POST https://pages.example.com/api/pages \
 
 Replace the address with your `BASE_URL`; `https://pages.example.com/d/hello/` (your address) then shows the page.
 
-**Deploying from GitHub Actions.** `.github/workflows/cloudflare-worker.yml` deploys the `main` branch of your copy of the repository. Add two repository secrets under *Settings* → *Secrets and variables* → *Actions*: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. A push that touches the workflow, the Worker sources, `wrangler.toml`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build and the review-browser test against the built Worker, then deploys with `wrangler@4.86.0`. Pull requests run the same checks but never deploy.
+**Deploying from GitHub Actions.** `.github/workflows/cloudflare-worker.yml` deploys the `main` branch of your copy of the repository. Under *Settings* → *Secrets and variables* → *Actions*, add four repository variables, `PAGES_BASE_URL`, `PAGES_D1_DATABASE_ID`, `PAGES_ROUTE_PATTERN` and `PAGES_ZONE_NAME` (the same values as step 3; leave the last two out for `workers.dev`), and three repository secrets, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and `PAGES_ALLOWED_EMAILS` (the comma-separated accounts). A push that touches the workflow, the Worker sources, `wrangler.toml`, `scripts/render_wrangler_config.mjs`, `migrations/**`, or `package.json`/`package-lock.json` runs `npm ci`, renders `wrangler.deploy.toml` from the variables, runs `npm test`, the Chromium install for Playwright, `npm run worker:check`, a dry-run build and the review-browser test against the built Worker, then deploys with `wrangler@4.86.0 deploy --config wrangler.deploy.toml --secrets-file <file>`. Every deploy uploads `PAGES_ALLOWED_EMAILS` as the Worker secret `ALLOWED_EMAILS` together with the code, so the deploy log shows it only as `(hidden)`. Set the other four secrets once with step 6 or `npm run worker:set-secrets`; they survive deploys. A push or manual run stops before deploying if a required variable or `PAGES_ALLOWED_EMAILS` is missing. Pull requests run the same checks but never deploy; when the repository variables are not available to a pull request (for example from a fork), it renders example values for the dry-run.
 
 A push that changes `migrations/**` stops the automatic deploy. Run the workflow manually from the *Actions* tab with `apply_d1_migrations` checked to apply the D1 migrations and then deploy.
 
 ## Configuration
 
-Both runtimes read the same variable names. On Cloudflare the secrets are set with `wrangler secret put` and the plain variables live in `wrangler.toml`; on Node every value comes from the environment or from the `.env` file in the working directory (`PAGES_ENV_FILE` points to another file). If a required value is missing, every Worker request fails with `500` and the Node server refuses to start.
+Both runtimes read the same variable names. On Cloudflare the secrets, `ALLOWED_EMAILS` included, are set with `wrangler secret put` and `BASE_URL` is rendered into `wrangler.deploy.toml` ([Install on Cloudflare Workers](#install-on-cloudflare-workers), step 3); on Node every value comes from the environment or from the `.env` file in the working directory (`PAGES_ENV_FILE` points to another file). If a required value is missing, every Worker request fails with `500` and the Node server refuses to start.
 
 | Name | Kind | Runtime | Description |
 |---|---|---|---|
@@ -274,7 +285,7 @@ Both runtimes read the same variable names. On Cloudflare the secrets are set wi
 | `SESSION_SECRET` | required, secret | both | Signs session cookies, annotation capability tokens, OAuth tokens and signed view links; changing it signs everyone out and invalidates issued links |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | required, secret | both | The Google OAuth client; its redirect URI is `<BASE_URL>/auth/google/callback` |
 | `BASE_URL` | required | both | Public base URL without a trailing slash |
-| `ALLOWED_EMAILS` | required | both | Comma-separated Google accounts allowed to sign in |
+| `ALLOWED_EMAILS` | required, secret on Cloudflare | both | Comma-separated Google accounts allowed to sign in |
 | `VTUBER_OPENAI_API_KEY` | optional, secret | both | For `POST /api/vtuber-live/session` of the private VTuber voice demo; without it the endpoint answers `503`. See `docs/vtuber-live.md` |
 | `PORT` | optional | Node | Listening port, default `3110` |
 | `HOST` | optional | Node | Listening address, default `127.0.0.1` |
@@ -291,13 +302,13 @@ The Worker also needs three bindings. They are declared in `wrangler.toml`; the 
 
 ## This repository's deployment
 
-`wrangler.toml` describes the author's own deployment. These are the values you replace when you install pages for yourself ([Install on Cloudflare Workers](#install-on-cloudflare-workers), step 3):
+`wrangler.toml` holds example values only. The author's deployment is rendered from this repository's GitHub variables `PAGES_BASE_URL`, `PAGES_D1_DATABASE_ID`, `PAGES_ROUTE_PATTERN` and `PAGES_ZONE_NAME`, and `ALLOWED_EMAILS` comes from the repository secret `PAGES_ALLOWED_EMAILS` ([Install on Cloudflare Workers](#install-on-cloudflare-workers), *Deploying from GitHub Actions*). The deployment has:
 
 - Worker `pages-cloudflare`, with `workers_dev = true` keeping the workers.dev URL
-- Custom domain route `pages.eiaserinnys.me` in zone `eiaserinnys.me` (the `[[routes]]` block)
-- D1 database `pages` with id `af7049be-6ba5-4261-bc05-e5773d3eec33`, bound as `PAGES_DB`; the id belongs to the author's account
+- A custom domain route in the author's zone (the `[[routes]]` block the render script adds)
+- D1 database `pages`, bound as `PAGES_DB`; its id belongs to the author's account
 - Private R2 bucket `pages-content`, bound as `PAGES_BUCKET`; uploaded HTML and bundle files are stored here so private pages are not exposed through a public R2 URL
-- `BASE_URL` and `ALLOWED_EMAILS` under `[vars]`
+- `BASE_URL` under `[vars]` and `ALLOWED_EMAILS` as a Worker secret
 - Durable Object class `PagesEvents` (SQLite-backed), bound as `PAGES_EVENTS`; keep the `[[migrations]]` block that creates it
 
 On the author's server the Node entry point runs under pm2: `pm2 start ecosystem.config.js` starts it from `~/services/pages/current`. `ecosystem.config.js` sets `cwd` via `process.env.HOME`, so do not change it to a relative path.
@@ -333,7 +344,7 @@ The upload endpoint accepts a JSON body only; it does not accept `multipart/form
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "url": "https://pages.eiaserinnys.me/p/a1b2c3d4e5f6",
+  "url": "https://pages.example.com/p/a1b2c3d4e5f6",
   "private": false
 }
 ```
@@ -343,13 +354,13 @@ If `doc` is present, the same response adds the document fields:
 ```json
 {
   "id": "b2c3d4e5f6a7",
-  "url": "https://pages.eiaserinnys.me/p/b2c3d4e5f6a7",
+  "url": "https://pages.example.com/p/b2c3d4e5f6a7",
   "private": false,
   "docId": "doc_123abc456def",
   "revId": "b2c3d4e5f6a7",
   "revNumber": 2,
-  "stableUrl": "https://pages.eiaserinnys.me/d/my-report",
-  "revisionUrl": "https://pages.eiaserinnys.me/d/my-report/r/2"
+  "stableUrl": "https://pages.example.com/d/my-report",
+  "revisionUrl": "https://pages.example.com/d/my-report/r/2"
 }
 ```
 
@@ -360,7 +371,7 @@ If `reviewable` is `true`, the response also includes a rev-scoped capability to
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "url": "https://pages.eiaserinnys.me/p/a1b2c3d4e5f6",
+  "url": "https://pages.example.com/p/a1b2c3d4e5f6",
   "private": false,
   "review": {
     "revId": "a1b2c3d4e5f6",
@@ -446,7 +457,7 @@ Returns document metadata and revisions in newest-first order:
   "title": "My Report",
   "owner": "api",
   "latestRevision": "b2c3d4e5f6a7",
-  "stableUrl": "https://pages.eiaserinnys.me/d/my-report",
+  "stableUrl": "https://pages.example.com/d/my-report",
   "createdAt": "2026-06-15T00:00:00.000Z",
   "updatedAt": "2026-06-15T01:00:00.000Z",
   "revisions": [
@@ -455,8 +466,8 @@ Returns document metadata and revisions in newest-first order:
       "revNumber": 2,
       "status": "published",
       "createdAt": "2026-06-15T01:00:00.000Z",
-      "pageUrl": "https://pages.eiaserinnys.me/p/b2c3d4e5f6a7",
-      "revisionUrl": "https://pages.eiaserinnys.me/d/my-report/r/2"
+      "pageUrl": "https://pages.example.com/p/b2c3d4e5f6a7",
+      "revisionUrl": "https://pages.example.com/d/my-report/r/2"
     }
   ]
 }
@@ -603,4 +614,4 @@ The same Worker code runs on plain Node 22 without Cloudflare. `src/node/` is a 
 
 ## Migration helpers
 
-The one-time migration helpers live in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`).
+The one-time migration helpers live in `scripts/` (`npm run worker:migrate:data`, `npm run worker:set-secrets`). `worker:migrate:data` needs the old store folder as `--source-dir` (or `PAGES_SOURCE_DIR`) and, unless `--skip-d1` is given, the D1 id as `--database-id` (or `PAGES_D1_DATABASE_ID`).

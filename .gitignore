@@ -3,3 +3,4 @@ node_modules/
 .local/
 __pycache__/
 *.pyc
+wrangler.deploy.toml
